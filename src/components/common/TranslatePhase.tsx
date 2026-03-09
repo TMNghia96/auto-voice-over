@@ -10,7 +10,11 @@ import {
     Play,
     Settings,
     FileText,
-    ArrowRight
+    ArrowRight,
+    FolderOpen,
+    Pencil,
+    Check,
+    X
 } from "lucide-react";
 import { parseSrt, stringifySrt, TARGET_LANGUAGES, type SrtEntry } from "@/lib/utils";
 import { useProcessContext } from "@/stores/ProcessStore";
@@ -29,6 +33,9 @@ export const TranslatePhase = ({ onComplete }: { onComplete?: () => void }) => {
     const [hasApiKey, setHasApiKey] = useState(false);
     const [isChecking, setIsChecking] = useState(true);
     const [progress, setProgress] = useState({ current: 0, total: 0, percent: 0 });
+    const [editingIndex, setEditingIndex] = useState<number | null>(null);
+    const [editingText, setEditingText] = useState("");
+    const editTextareaRef = useRef<HTMLTextAreaElement>(null);
 
     const { setIsProcessing: setGlobalProcessing } = useProcessContext();
 
@@ -214,6 +221,34 @@ ${userPrompt}`.trim();
         }
     };
 
+    const handleStartEdit = (entry: SrtEntry) => {
+        setEditingIndex(entry.index);
+        setEditingText(entry.text);
+        setTimeout(() => editTextareaRef.current?.focus(), 50);
+    };
+
+    const handleCancelEdit = () => {
+        setEditingIndex(null);
+        setEditingText("");
+    };
+
+    const handleSaveEdit = async (entryIndex: number) => {
+        const updatedEntries = translatedEntries.map(e =>
+            e.index === entryIndex ? { ...e, text: editingText } : e
+        );
+        setTranslatedEntries(updatedEntries);
+        setEditingIndex(null);
+        setEditingText("");
+
+        const srtContent = stringifySrt(updatedEntries);
+        await window.api.saveTranslatedSrt(projectPath, selectedLang, srtContent);
+    };
+
+    const handleOpenFile = () => {
+        const filePath = `${projectPath}/translate/${selectedLang}.srt`;
+        window.api.openInExplorer(filePath);
+    };
+
     if (isChecking) {
         return (
             <div className="flex items-center justify-center h-full">
@@ -335,14 +370,24 @@ ${userPrompt}`.trim();
                                 <p className="text-xs text-muted-foreground">
                                     {translatedEntries.length} phân đoạn đã được dịch sang {TARGET_LANGUAGES.find(l => l.code === selectedLang)?.name}
                                     <br />
-                                    <span className="text-primary">Đã lưu file vào thư mục translation/</span>
+                                    <span className="text-primary">Đã lưu file vào thư mục translate/</span>
                                 </p>
                             </div>
                         </div>
                         <div className="flex gap-2">
+                            <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={handleOpenFile}
+                                title={`Mở file ${selectedLang}.srt trong Explorer`}
+                            >
+                                <FolderOpen className="w-3.5 h-3.5 mr-1.5" />
+                                Mở file SRT
+                            </Button>
                             <Button variant="outline" size="sm" onClick={() => {
                                 setTranslatedEntries([]);
                                 setPhase("idle");
+                                setEditingIndex(null);
                             }}>
                                 Dịch lại
                             </Button>
@@ -366,11 +411,52 @@ ${userPrompt}`.trim();
                                         </p>
                                         <p className="text-sm">{srtEntries[i]?.text}</p>
                                     </div>
-                                    <div className="p-3">
+                                    <div className="p-3 group relative">
                                         <p className="text-xs text-primary font-mono mb-1 flex items-center gap-2">
                                             <ReactCountryFlag countryCode={TARGET_LANGUAGES.find(l => l.code === selectedLang)?.flag || ""} svg /> Bản dịch
                                         </p>
-                                        <p className="text-sm">{entry.text}</p>
+                                        {editingIndex === entry.index ? (
+                                            <div className="flex flex-col gap-2">
+                                                <textarea
+                                                    ref={editTextareaRef}
+                                                    className="w-full min-h-[60px] text-sm p-1.5 rounded border border-primary/50 bg-background resize-y focus:outline-none focus:ring-1 focus:ring-primary"
+                                                    value={editingText}
+                                                    onChange={e => setEditingText(e.target.value)}
+                                                    onKeyDown={e => {
+                                                        if (e.key === "Escape") handleCancelEdit();
+                                                        if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) handleSaveEdit(entry.index);
+                                                    }}
+                                                />
+                                                <div className="flex gap-1">
+                                                    <Button
+                                                        size="sm"
+                                                        variant="default"
+                                                        className="h-6 px-2 text-xs"
+                                                        onClick={() => handleSaveEdit(entry.index)}
+                                                    >
+                                                        <Check className="w-3 h-3 mr-1" /> Lưu
+                                                    </Button>
+                                                    <Button
+                                                        size="sm"
+                                                        variant="ghost"
+                                                        className="h-6 px-2 text-xs"
+                                                        onClick={handleCancelEdit}
+                                                    >
+                                                        <X className="w-3 h-3 mr-1" /> Huỷ
+                                                    </Button>
+                                                    <span className="text-xs text-muted-foreground self-center ml-1">Ctrl+Enter để lưu</span>
+                                                </div>
+                                            </div>
+                                        ) : (
+                                            <div
+                                                className="flex items-start gap-1 cursor-pointer"
+                                                onClick={() => handleStartEdit(entry)}
+                                                title="Click để chỉnh sửa"
+                                            >
+                                                <p className="text-sm flex-1">{entry.text}</p>
+                                                <Pencil className="w-3 h-3 text-muted-foreground/50 group-hover:text-primary shrink-0 mt-0.5 opacity-0 group-hover:opacity-100 transition-opacity" />
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             ))}
