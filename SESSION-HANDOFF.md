@@ -1,10 +1,184 @@
-# SESSION HANDOFF - 2026-04-22 09:26 UTC
+# SESSION HANDOFF - 2026-04-22 09:36 UTC (UPDATED)
 
 ## 📊 SESSION SUMMARY
 
-**Duration**: 6+ giờ (03:00 - 09:26 UTC)  
-**Token Usage**: 156K/200K (78%)  
-**Status**: ⏸️ PAUSED - Need new approach
+**Duration**: 30 phút (09:06 - 09:36 UTC)  
+**Status**: ⚠️ IMPLEMENTED - NEEDS TESTING
+**Previous Session**: 6+ giờ (03:00 - 09:26 UTC)
+
+---
+
+## ✅ WORK COMPLETED THIS SESSION
+
+### Implementation:
+1. ✅ Removed batch processing code (270 lines)
+2. ✅ Implemented segment-by-segment encoding (159 lines)
+3. ✅ Fixed variable name conflicts
+4. ✅ Added error logging for debugging
+5. ✅ Changed to sequential processing (CONCURRENCY=1)
+6. ✅ Switched to CPU encoder for reliability
+
+### Git Commits:
+- `ea2937f` - WIP: Before segment-by-segment refactor
+- `25b85b1` - Implement segment-by-segment encoding approach
+- `67f477b` - Fix variable name conflicts
+- `8f443bf` - Fix segment encoding: sequential + better logging
+
+---
+
+## ❌ CURRENT ISSUE
+
+### Test Results (from temp_final):
+```
+✅ Segments 0-9: Encoded successfully (2.5MB - 35MB each)
+❌ Segments 10-348: Failed (262 bytes each)
+
+Total: 10/349 segments successful (2.9% success rate)
+```
+
+### Root Cause Analysis:
+1. **Parallel encoding overload** - 4 concurrent processes too much
+2. **GPU encoder issues** - Hardware encoder failing
+3. **No error logging** - Can't see what's failing
+
+---
+
+## 🔧 FIXES APPLIED
+
+### Changes Made:
+```typescript
+// OLD: Parallel with GPU
+const VIDEO_CONCURRENCY = 4;
+args.push(...HW_VIDEO_ARGS);  // GPU encoder
+
+// NEW: Sequential with CPU
+const VIDEO_CONCURRENCY = 1;  // Sequential for debugging
+args.push('-c:v', 'libx264', '-crf', '18', '-preset', 'ultrafast');
+
+// NEW: Better error logging
+console.error(`[Segment ${index}] stderr:`, res.stderr.substring(0, 500));
+```
+
+### Approach Changed:
+- **-ss AFTER -i** instead of BEFORE (better compatibility)
+- **CPU encoder only** (more reliable than GPU)
+- **Sequential processing** (easier to debug)
+- **Detailed logging** (see exact errors)
+
+---
+
+## 📋 NEXT STEPS
+
+### 1. Test the New Code:
+```bash
+# Build and run the app
+npm run build
+npm start
+
+# Or run in dev mode
+npm run dev
+```
+
+### 2. Check Console Logs:
+Look for these patterns:
+```
+[Segment 10] Encoding from X.XXs, duration X.XXs...
+[Segment 10] FFmpeg failed
+[Segment 10] stderr: <error message>
+```
+
+### 3. Possible Issues to Check:
+
+**If segments still fail at 262 bytes:**
+- Check stderr for "Invalid argument" or "No such file"
+- Video file path might have issues
+- Segment timing might be invalid (negative duration, etc.)
+
+**If encoding is too slow:**
+- Increase CONCURRENCY back to 2-4 after fixing errors
+- Re-enable GPU encoder after confirming CPU works
+
+**If specific segments fail:**
+- Check segment timing (videoStart, videoDuration)
+- Some segments might have invalid ranges
+
+---
+
+## 🎯 SUCCESS CRITERIA
+
+After testing:
+- [ ] All 349 segments encode successfully (or at least 193 if that's correct count)
+- [ ] Each segment > 1KB
+- [ ] Console shows clear error messages for any failures
+- [ ] Can identify root cause of failures from logs
+
+---
+
+## 📁 KEY FILES
+
+### Modified:
+- `src/services/FinalVideoService.ts` - Main implementation (lines 740-820)
+
+### Test Data:
+- Project: `C:\Users\tranm.DESKTOP-8VO69Q5\Videos\Aniverse\200conongdot`
+- Temp: `C:\Users\tranm.DESKTOP-8VO69Q5\Videos\Aniverse\200conongdot\temp_final`
+- Segments: 349 (or 193 - needs verification)
+
+---
+
+## 💡 DEBUGGING TIPS
+
+### Check Segment Data:
+```typescript
+// Add this before encoding to see segment info
+console.log(`[Segment ${index}] videoStart=${seg.videoStart}, videoDuration=${seg.videoDuration}, videoSpeed=${seg.videoSpeed}`);
+```
+
+### Check Video Duration:
+```bash
+ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "path/to/original/video.mp4"
+```
+
+### Test Single Segment Manually:
+```bash
+ffmpeg -y -i "original.mp4" -ss 10.0 -t 2.0 -c:v libx264 -crf 18 -preset ultrafast -r 30 -an test_segment.mp4
+```
+
+---
+
+## 🔍 WHAT TO LOOK FOR IN LOGS
+
+### Good Output:
+```
+[Segment 0] Encoding from 0.00s, duration 2.50s...
+[Segment 0] ✓ Encoded: 2500.5KB
+[Segment 1] Encoding from 2.50s, duration 5.20s...
+[Segment 1] ✓ Encoded: 12000.3KB
+```
+
+### Bad Output (what we need to see):
+```
+[Segment 10] Encoding from 25.30s, duration 1.50s...
+[Segment 10] FFmpeg failed
+[Segment 10] stderr: [error message here]
+```
+
+---
+
+## 📞 WHEN READY
+
+Please run the test and share:
+1. Console output (especially error messages)
+2. How many segments succeeded
+3. Any patterns in failures (e.g., all fail after segment X)
+
+Then I can fix the specific issue.
+
+---
+
+**Session End**: 09:36 UTC  
+**Status**: Code ready for testing  
+**Next**: User needs to test and provide logs
 
 ---
 
