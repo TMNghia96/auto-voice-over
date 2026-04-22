@@ -745,8 +745,8 @@ export const createFinalVideo = async (
         onProgress({ status: 'rerendering', progress: 60, detail: `Đang xử lý ${segments.length} đoạn video...` });
         
         const segmentVideos: string[] = [];
-        const CONCURRENCY = 4; // Process 4 segments in parallel
-        const limit = pLimit(CONCURRENCY);
+        const VIDEO_CONCURRENCY = 4; // Process 4 segments in parallel
+        const videoLimit = pLimit(VIDEO_CONCURRENCY);
         
         // Function to encode a single segment
         const encodeSegment = async (seg: Segment, index: number): Promise<string | null> => {
@@ -817,7 +817,7 @@ export const createFinalVideo = async (
         
         // Encode all segments in parallel
         const encodePromises = segments.map((seg, i) => 
-            limit(async () => {
+            videoLimit(async () => {
                 const result = await encodeSegment(seg, i);
                 const progress = 60 + Math.round(((i + 1) / segments.length) * 25);
                 onProgress({ status: 'rerendering', progress, detail: `Đã xử lý ${i + 1}/${segments.length} đoạn...` });
