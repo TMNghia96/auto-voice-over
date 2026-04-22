@@ -56,23 +56,42 @@ export class VideoProcessor {
     // Process segments in parallel
     const encodePromises = segments.map((segment, index) =>
       limit(async () => {
-        const result = await this.encodeSegmentWithRetry(
-          encoder,
-          segment,
-          index,
-          originalVideo,
-          tempDir
-        );
+        try {
+          const result = await this.encodeSegmentWithRetry(
+            encoder,
+            segment,
+            index,
+            originalVideo,
+            tempDir
+          );
 
-        completedCount++;
-        onProgress(completedCount / segments.length);
+          completedCount++;
+          onProgress(completedCount / segments.length);
 
-        return result.outputPath;
+          return { success: true, path: result.outputPath, index };
+        } catch (error) {
+          completedCount++;
+          onProgress(completedCount / segments.length);
+          
+          console.error(`Segment ${index} failed permanently:`, error);
+          return { success: false, path: null, index, error: (error as Error).message };
+        }
       })
     );
 
     const results = await Promise.all(encodePromises);
-    return results;
+    
+    // Check for failures
+    const failures = results.filter(r => !r.success);
+    if (failures.length > 0) {
+      console.error(`${failures.length}/${segments.length} segments failed to encode`);
+      failures.slice(0, 5).forEach(f => {
+        console.error(`  - Segment ${f.index}: ${f.error}`);
+      });
+      throw new Error(`Failed to encode ${failures.length} segments. First error: ${failures[0].error}`);
+    }
+    
+    return results.map(r => r.path!);
   }
 
   /**
@@ -95,6 +114,13 @@ export class VideoProcessor {
       crf: 23,
       preset: 'medium',
     };
+
+    console.log(`[VideoProcessor] Encoding segment ${index}:`, {
+      startTime: encodeOptions.startTime.toFixed(2),
+      duration: encodeOptions.duration.toFixed(2),
+      speed: encodeOptions.videoSpeed.toFixed(2),
+      encoder: encoder.name
+    });
 
     let lastError: Error | null = null;
     let currentEncoder = encoder;
