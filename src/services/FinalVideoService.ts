@@ -748,17 +748,77 @@ export const createFinalVideo = async (
         const VIDEO_CONCURRENCY = 1; // Process segments sequentially for now (debug)
         const videoLimit = pLimit(VIDEO_CONCURRENCY);
         
+        // Get video duration for validation
+        const videoDuration = await getMediaDuration(originalVideo);
+        console.log(`[Video] Original video duration: ${videoDuration.toFixed(2)}s`);
+        console.log(`[Video] Total segments: ${segments.length}`);
+        
         // Function to encode a single segment
         const encodeSegment = async (seg: Segment, index: number): Promise<string | null> => {
             const segmentPath = path.join(tempDir, `segment_${String(index).padStart(4, '0')}.mp4`);
             
-            // CRITICAL: Use -i BEFORE -ss for better compatibility
-            // Then use trim filter for exact extraction
+            // CRITICAL: Handle segments that exceed video duration
+            if (seg.videoStart >= videoDuration) {
+                console.warn(`[Segment ${index}] videoStart ${seg.videoStart.toFixed(2)}s >= video duration ${videoDuration.toFixed(2)}s - creating black video`);
+                
+                // Create black video with correct duration
+                const blackRes = await runFfmpeg([
+                    '-y',
+                    '-f', 'lavfi', '-i', `color=c=black:s=1920x1080:r=${fps.toFixed(3)}`,
+                    '-t', seg.videoDuration.toFixed(4),
+                    '-c:v', 'libx264', '-crf', '18', '-preset', 'ultrafast',
+                    '-pix_fmt', 'yuv420p',
+                    segmentPath
+                ]);
+                
+                if (!blackRes.success || !fs.existsSync(segmentPath)) {
+                    console.error(`[Segment ${index}] Failed to create black video`);
+                    return null;
+                }
+                
+                const segSize = fs.statSync(segmentPath).size;
+                console.log(`[Segment ${index}] ✓ Black video: ${(segSize / 1024).toFixed(1)}KB`);
+                return segmentPath;
+            }
+            
+            // Adjust videoEnd if it exceeds video duration
+            let adjustedVideoEnd = seg.videoEnd;
+            let adjustedVideoDuration = seg.videoDuration;
+            
+            if (seg.videoEnd > videoDuration) {
+                console.warn(`[Segment ${index}] Adjusting: videoEnd ${seg.videoEnd.toFixed(2)}s > video duration ${videoDuration.toFixed(2)}s`);
+                adjustedVideoEnd = videoDuration;
+                adjustedVideoDuration = adjustedVideoEnd - seg.videoStart;
+                
+                if (adjustedVideoDuration <= 0.01) {
+                    console.error(`[Segment ${index}] SKIP: adjusted videoDuration ${adjustedVideoDuration.toFixed(4)}s too small`);
+                    // Create minimal black video instead
+                    const blackRes = await runFfmpeg([
+                        '-y',
+                        '-f', 'lavfi', '-i', `color=c=black:s=1920x1080:r=${fps.toFixed(3)}`,
+                        '-t', seg.videoDuration.toFixed(4),
+                        '-c:v', 'libx264', '-crf', '18', '-preset', 'ultrafast',
+                        '-pix_fmt', 'yuv420p',
+                        segmentPath
+                    ]);
+                    
+                    if (!blackRes.success || !fs.existsSync(segmentPath)) {
+                        console.error(`[Segment ${index}] Failed to create black video`);
+                        return null;
+                    }
+                    
+                    const segSize = fs.statSync(segmentPath).size;
+                    console.log(`[Segment ${index}] ✓ Black video (adjusted): ${(segSize / 1024).toFixed(1)}KB`);
+                    return segmentPath;
+                }
+            }
+            
+            // Normal video extraction
             const args = [
                 '-y',
                 '-i', originalVideo,
-                '-ss', seg.videoStart.toFixed(4),  // Seek AFTER input
-                '-t', seg.videoDuration.toFixed(4)  // Duration to extract
+                '-ss', seg.videoStart.toFixed(4),
+                '-t', adjustedVideoDuration.toFixed(4)
             ];
             
             // Add speed filter if needed
