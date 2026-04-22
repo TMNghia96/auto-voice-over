@@ -1,9 +1,28 @@
 import path from 'path';
 import fs from 'fs';
-import { spawn } from 'child_process';
-import { getFfmpegPath, getHandBrakePath } from './EnvironmentService';
+import { spawn, exec } from 'child_process';
+import { getFfmpegPath, getFfprobePath } from './EnvironmentService';
 import { parseSrt, timeToSeconds } from '../lib/SrtOptimizer';
 import { getHardwareInfo } from './HardwareService';
+import pLimit from 'p-limit';
+import { tempManager } from './TempFileManager';
+
+let activeProcesses: ReturnType<typeof spawn>[] = [];
+export let isCancelled = false;
+
+export const cancelFinalVideo = () => {
+    isCancelled = true;
+    for (const proc of activeProcesses) {
+        try {
+            if (process.platform === 'win32' && proc.pid) {
+                exec(`taskkill /pid ${proc.pid} /t /f`);
+            } else {
+                proc.kill('SIGKILL');
+            }
+        } catch (e) {}
+    }
+    activeProcesses = [];
+};
 
 export interface FinalVideoProgress {
     status: 'preparing' | 'processing' | 'concatenating' | 'rerendering' | 'done' | 'error';
@@ -21,15 +40,27 @@ interface Segment {
     videoDuration: number;
     audioPath?: string;
     audioDuration?: number;
+    targetDuration: number;
+    audioSpeed: number;
+    videoSpeed: number;
+    fadeStart?: boolean;
+    fadeEnd?: boolean;
 }
 
-/**
- * Run an ffmpeg command and return a promise
- */
+interface SegmentTiming {
+    expectedDuration: number;
+    actualDuration: number;
+    drift: number;
+}
+
+const MAX_AUDIO_SPEEDUP = 1.4; // Tăng từ 1.3 để giảm slow motion video
+
 const runFfmpeg = (args: string[]): Promise<{ success: boolean; stderr: string }> => {
     return new Promise((resolve) => {
+        if (isCancelled) return resolve({ success: false, stderr: 'Cancelled' });
         const ffmpeg = getFfmpegPath();
         const proc = spawn(ffmpeg, args, { windowsHide: true });
+        activeProcesses.push(proc);
         let stderr = '';
 
         proc.stderr.on('data', (data) => {
@@ -37,30 +68,95 @@ const runFfmpeg = (args: string[]): Promise<{ success: boolean; stderr: string }
         });
 
         proc.on('close', (code) => {
+            activeProcesses = activeProcesses.filter(p => p !== proc);
             resolve({ success: code === 0, stderr });
         });
 
         proc.on('error', (err) => {
+            activeProcesses = activeProcesses.filter(p => p !== proc);
             resolve({ success: false, stderr: err.message });
         });
     });
 };
 
-/**
- * Get the duration of a media file in seconds
- */
+const getAtempoFilter = (speed: number): string => {
+    if (Math.abs(speed - 1.0) < 0.001) return '';
+    let r = speed;
+    const stack = [];
+    while (r > 2.0) {
+        stack.push('atempo=2.0');
+        r /= 2.0;
+    }
+    while (r < 0.5) {
+        stack.push('atempo=0.5');
+        r /= 0.5;
+    }
+    if (Math.abs(r - 1.0) > 0.001) stack.push(`atempo=${r.toFixed(4)}`);
+    return stack.join(',');
+};
+
+const createFadeExpression = (
+    seg: Segment,
+    duckVolume: number,
+    fadeDuration: number
+): string => {
+    const duck = duckVolume.toFixed(2);
+    
+    // If segment is too short for any meaningful fade, return constant volume
+    if (seg.targetDuration < 0.2) {
+        // For gap segments, use duck volume; for others use full volume
+        return seg.fadeStart || seg.fadeEnd ? duck : '1.0';
+    }
+    
+    const minDuration = fadeDuration * 2 + 0.1;
+    let adjustedFade = fadeDuration;
+    
+    if (seg.targetDuration < minDuration) {
+        adjustedFade = Math.max(0.05, (seg.targetDuration - 0.1) / 2);
+    }
+    
+    const fadeOutStart = seg.targetDuration - adjustedFade;
+    
+    // Ensure fadeOutStart is not negative
+    if (fadeOutStart <= 0 || adjustedFade <= 0) {
+        // Segment too short for fade, return constant duck volume
+        return duck;
+    }
+    
+    const range = (1.0 - duckVolume).toFixed(2);
+    const fade = adjustedFade.toFixed(3);
+    const fadeOut = fadeOutStart.toFixed(3);
+    
+    // Use gte instead of lt for fade-out to avoid negative time calculations
+    if (seg.fadeStart && seg.fadeEnd) {
+        return `if(lt(t,${fade}),${duck}+${range}*t/${fade},if(gte(t,${fadeOut}),1.0-${range}*(t-${fadeOut})/${fade},1.0))`;
+    } else if (seg.fadeStart) {
+        return `if(lt(t,${fade}),${duck}+${range}*t/${fade},1.0)`;
+    } else if (seg.fadeEnd) {
+        return `if(gte(t,${fadeOut}),1.0-${range}*(t-${fadeOut})/${fade},1.0)`;
+    }
+    
+    return '1.0';
+};
+
+const validateFadeExpression = (expr: string): boolean => {
+    if (expr.length > 250) return false;
+    let count = 0;
+    for (const char of expr) {
+        if (char === '(') count++;
+        if (char === ')') count--;
+        if (count < 0) return false;
+    }
+    return count === 0;
+};
+
 const getMediaDuration = async (filePath: string): Promise<number> => {
     return new Promise((resolve) => {
         const ffmpeg = getFfmpegPath();
-        const proc = spawn(ffmpeg, [
-            '-i', filePath,
-            '-f', 'null', '-'
-        ], { windowsHide: true });
+        const proc = spawn(ffmpeg, ['-i', filePath, '-f', 'null', '-'], { windowsHide: true });
 
         let stderr = '';
-        proc.stderr.on('data', (data) => {
-            stderr += data.toString();
-        });
+        proc.stderr.on('data', (data) => stderr += data.toString());
 
         proc.on('close', () => {
             const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/);
@@ -68,15 +164,51 @@ const getMediaDuration = async (filePath: string): Promise<number> => {
                 const hours = parseInt(match[1]);
                 const minutes = parseInt(match[2]);
                 const seconds = parseInt(match[3]);
-                const centiseconds = parseInt(match[4]);
-                resolve(hours * 3600 + minutes * 60 + seconds + centiseconds / 100);
+                const decimals = parseFloat(`0.${match[4]}`);
+                resolve(hours * 3600 + minutes * 60 + seconds + decimals);
             } else {
                 resolve(0);
             }
         });
-
         proc.on('error', () => resolve(0));
     });
+};
+
+const getVideoFps = (filePath: string): Promise<number> => {
+    return new Promise((resolve) => {
+        const ffprobe = getFfprobePath();
+        const proc = spawn(ffprobe, [
+            '-v', 'error', '-select_streams', 'v:0',
+            '-show_entries', 'stream=r_frame_rate',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            filePath
+        ], { windowsHide: true });
+
+        let stdout = '';
+        proc.stdout.on('data', (data) => stdout += data.toString());
+
+        proc.on('close', (code) => {
+            if (code === 0 && stdout.trim()) {
+                const [num, den] = stdout.trim().split('/').map(Number);
+                if (den && den !== 0) return resolve(num / den);
+            }
+            resolve(30);
+        });
+        proc.on('error', () => resolve(30));
+    });
+};
+
+const hasAudioStream = async (filePath: string): Promise<boolean> => {
+    const { stderr } = await runFfmpeg(['-i', filePath, '-hide_banner']);
+    return /Stream\s+#.*Audio:/i.test(stderr);
+};
+
+const findOriginalAudio = (projectPath: string): string | null => {
+    const audioDir = path.join(projectPath, 'original', 'audio');
+    if (!fs.existsSync(audioDir)) return null;
+    const files = fs.readdirSync(audioDir);
+    const audioFile = files.find(f => /\.(mp3|m4a|aac|wav|ogg|opus|flac)$/i.test(f));
+    return audioFile ? path.join(audioDir, audioFile) : null;
 };
 
 const findOriginalVideo = (projectPath: string): string | null => {
@@ -108,6 +240,8 @@ const buildSegmentMap = async (
         const entryStart = timeToSeconds(entry.startTime);
         const entryEnd = timeToSeconds(entry.endTime);
 
+        if (entryEnd <= entryStart) continue; // Bỏ qua đoạn rỗng hoặc lỗi thời gian
+
         const prevEnd = i === 0 ? 0 : timeToSeconds(entries[i - 1].endTime);
         if (entryStart > prevEnd + 0.05) {
             segments.push({
@@ -115,6 +249,9 @@ const buildSegmentMap = async (
                 videoStart: prevEnd,
                 videoEnd: entryStart,
                 videoDuration: entryStart - prevEnd,
+                targetDuration: entryStart - prevEnd,
+                audioSpeed: 1.0,
+                videoSpeed: 1.0,
             });
         }
 
@@ -125,6 +262,52 @@ const buildSegmentMap = async (
             audioDuration = await getMediaDuration(audioPath);
         }
 
+        const originalDuration = entryEnd - entryStart;
+        let targetDuration = originalDuration;
+        let audioSpeed = 1.0;
+        let videoSpeed = 1.0;
+
+        if (audioDuration > 0) {
+            const ratio = audioDuration / originalDuration;
+            if (ratio > MAX_AUDIO_SPEEDUP) {
+                // Audio quá dài -> Tăng tốc tối đa 1.4x và làm chậm video tương ứng
+                audioSpeed = MAX_AUDIO_SPEEDUP;
+                targetDuration = audioDuration / MAX_AUDIO_SPEEDUP;
+                videoSpeed = targetDuration / originalDuration;
+                
+                console.log(`[SegmentMap] Segment ${entry.index} (LONG AUDIO):`);
+                console.log(`  videoStart: ${entryStart.toFixed(3)}s, videoEnd: ${entryEnd.toFixed(3)}s`);
+                console.log(`  videoDuration: ${originalDuration.toFixed(3)}s`);
+                console.log(`  audioDuration: ${audioDuration.toFixed(3)}s`);
+                console.log(`  ratio: ${ratio.toFixed(4)} (> ${MAX_AUDIO_SPEEDUP})`);
+                console.log(`  → audioSpeed: ${audioSpeed.toFixed(4)}`);
+                console.log(`  → targetDuration: ${targetDuration.toFixed(3)}s`);
+                console.log(`  → videoSpeed: ${videoSpeed.toFixed(4)} (slow motion)`);
+            } else if (ratio > 1.0) {
+                // Audio dài hơn nhưng <= 1.4x -> Tăng tốc audio để vừa khít originalDuration
+                audioSpeed = ratio;
+                targetDuration = originalDuration;
+                videoSpeed = 1.0;
+                
+                console.log(`[SegmentMap] Segment ${entry.index} (SPEEDUP AUDIO):`);
+                console.log(`  videoDuration: ${originalDuration.toFixed(3)}s, audioDuration: ${audioDuration.toFixed(3)}s`);
+                console.log(`  ratio: ${ratio.toFixed(4)}`);
+                console.log(`  → audioSpeed: ${audioSpeed.toFixed(4)}, targetDuration: ${targetDuration.toFixed(3)}s, videoSpeed: 1.0`);
+            } else {
+                // Audio ngắn hơn -> Giữ nguyên 1.0x, padding silence ở cuối (targetDuration = originalDuration)
+                audioSpeed = 1.0;
+                targetDuration = originalDuration;
+                videoSpeed = 1.0;
+                
+                if (ratio < 0.95) {
+                    console.log(`[SegmentMap] Segment ${entry.index} (SHORT AUDIO - PADDING):`);
+                    console.log(`  videoDuration: ${originalDuration.toFixed(3)}s, audioDuration: ${audioDuration.toFixed(3)}s`);
+                    console.log(`  ratio: ${ratio.toFixed(4)}`);
+                    console.log(`  → Will pad ${(originalDuration - audioDuration).toFixed(3)}s silence`);
+                }
+            }
+        }
+
         segments.push({
             type: 'dubbed',
             index: entry.index,
@@ -133,6 +316,9 @@ const buildSegmentMap = async (
             videoDuration: entryEnd - entryStart,
             audioPath: fs.existsSync(audioPath) ? audioPath : undefined,
             audioDuration,
+            targetDuration,
+            audioSpeed,
+            videoSpeed,
         });
     }
 
@@ -144,255 +330,55 @@ const buildSegmentMap = async (
                 videoStart: lastEnd,
                 videoEnd: totalVideoDuration,
                 videoDuration: totalVideoDuration - lastEnd,
+                targetDuration: totalVideoDuration - lastEnd,
+                audioSpeed: 1.0,
+                videoSpeed: 1.0,
             });
         }
+    }
+
+    // Gắn cờ fade cho các đoạn gap
+    for (let i = 0; i < segments.length; i++) {
+        if (segments[i].type === 'gap') {
+            segments[i].fadeStart = (i > 0 && segments[i - 1].type === 'dubbed');
+            segments[i].fadeEnd = (i < segments.length - 1 && segments[i + 1].type === 'dubbed');
+        }
+    }
+
+    // DEBUG: Export segment map to JSON for analysis
+    console.log(`[SegmentMap] Total segments: ${segments.length}`);
+    const totalTargetDuration = segments.reduce((sum, s) => sum + s.targetDuration, 0);
+    console.log(`[SegmentMap] Total target duration: ${totalTargetDuration.toFixed(3)}s`);
+    console.log(`[SegmentMap] Original video duration: ${totalVideoDuration.toFixed(3)}s`);
+    console.log(`[SegmentMap] Duration difference: ${(totalTargetDuration - totalVideoDuration).toFixed(3)}s`);
+    
+    // Count segments by type
+    const dubbedCount = segments.filter(s => s.type === 'dubbed').length;
+    const gapCount = segments.filter(s => s.type === 'gap').length;
+    console.log(`[SegmentMap] Dubbed: ${dubbedCount}, Gap: ${gapCount}`);
+    
+    // Check for invalid segments
+    const invalidSegments = segments.filter(s => s.targetDuration <= 0 || isNaN(s.targetDuration));
+    if (invalidSegments.length > 0) {
+        console.error(`[SegmentMap] WARNING: ${invalidSegments.length} segments have invalid targetDuration!`);
+        invalidSegments.forEach(s => {
+            console.error(`  Segment ${s.index || 'gap'}: targetDuration=${s.targetDuration}`);
+        });
     }
 
     return segments;
 };
 
-/**
- * Video encoding args — used for ALL segments.
- * Re-encoding everything ensures:
- * - Each clip starts with a proper keyframe (no frozen frames)
- * - Frame-accurate seeking (no missing video)
- * - Consistent codec params across all clips (no stuttering at concat joins)
- */
-let VIDEO_ENCODE_ARGS: string[] = [];
-let HANDBRAKE_ENCODER = 'nvenc_h264';
-
-const setupHardwareEncoders = async () => {
-    const hwInfo = await getHardwareInfo();
-    if (hwInfo.hasAmdGpu) {
-        VIDEO_ENCODE_ARGS = [
-            '-c:v', 'h264_amf',
-            '-quality', 'quality',
-            '-rc', 'cqp',
-            '-qp_i', '20',
-            '-qp_p', '20',
-            '-qp_b', '20',
-        ];
-        HANDBRAKE_ENCODER = 'vce_h264';
-    } else if (hwInfo.hasNvidiaGpu) {
-        VIDEO_ENCODE_ARGS = [
-            '-c:v', 'h264_nvenc',
-            '-preset', 'p4',
-            '-rc', 'vbr',
-            '-cq', '20',
-            '-b:v', '0',
-        ];
-        HANDBRAKE_ENCODER = 'nvenc_h264';
-    } else {
-        VIDEO_ENCODE_ARGS = [
-            '-c:v', 'libx264',
-            '-preset', 'fast',
-            '-crf', '22',
-        ];
-        HANDBRAKE_ENCODER = 'x264';
-    }
-};
-
-const AUDIO_ARGS = ['-c:a', 'aac', '-b:a', '192k', '-ar', '44100', '-ac', '2'];
-
-/**
- * Process a single segment into a self-contained video+audio clip.
- * ALL segments are re-encoded with NVENC to guarantee clean keyframes.
- */
-const processSegment = async (
-    segment: Segment,
-    originalVideoPath: string,
-    tempDir: string,
-    segIndex: number,
-): Promise<string | null> => {
-    const outputPath = path.join(tempDir, `seg_${String(segIndex).padStart(4, '0')}.mp4`);
-    const duration = segment.videoDuration;
-
-    if (segment.type === 'gap') {
-        const result = await runFfmpeg([
-            '-y',
-            '-ss', segment.videoStart.toFixed(3),
-            '-t', duration.toFixed(3),
-            '-i', originalVideoPath,
-            ...VIDEO_ENCODE_ARGS,
-            ...AUDIO_ARGS,
-            outputPath,
-        ]);
-        return result.success ? outputPath : null;
-    }
-
-    if (!segment.audioPath || !segment.audioDuration || segment.audioDuration === 0) {
-        const result = await runFfmpeg([
-            '-y',
-            '-ss', segment.videoStart.toFixed(3),
-            '-t', duration.toFixed(3),
-            '-i', originalVideoPath,
-            '-f', 'lavfi', '-i', 'anullsrc=channel_layout=stereo:sample_rate=44100',
-            '-map', '0:v', '-map', '1:a',
-            ...VIDEO_ENCODE_ARGS,
-            ...AUDIO_ARGS,
-            '-t', duration.toFixed(3),
-            outputPath,
-        ]);
-        return result.success ? outputPath : null;
-    }
-
-    const videoDur = segment.videoDuration;
-    const audioDur = segment.audioDuration;
-    const ratio = audioDur / videoDur;
-
-    if (ratio <= 1.0) {
-        const result = await runFfmpeg([
-            '-y',
-            '-ss', segment.videoStart.toFixed(3),
-            '-t', videoDur.toFixed(3),
-            '-i', originalVideoPath,
-            '-i', segment.audioPath,
-            '-map', '0:v', '-map', '1:a',
-            ...VIDEO_ENCODE_ARGS,
-            '-af', 'apad',
-            ...AUDIO_ARGS,
-            '-t', videoDur.toFixed(3),
-            outputPath,
-        ]);
-        return result.success ? outputPath : null;
-    }
-
-    if (ratio <= 1.3) {
-        const result = await runFfmpeg([
-            '-y',
-            '-ss', segment.videoStart.toFixed(3),
-            '-t', videoDur.toFixed(3),
-            '-i', originalVideoPath,
-            '-i', segment.audioPath,
-            '-map', '0:v', '-map', '1:a',
-            ...VIDEO_ENCODE_ARGS,
-            '-af', `atempo=${ratio.toFixed(4)},apad`,
-            ...AUDIO_ARGS,
-            '-t', videoDur.toFixed(3),
-            outputPath,
-        ]);
-        return result.success ? outputPath : null;
-    }
-
-    const adjustedAudioDur = audioDur / 1.3;
-    const videoSlowFactor = adjustedAudioDur / videoDur;
-    const targetDur = adjustedAudioDur;
-
-    const result = await runFfmpeg([
-        '-y',
-        '-ss', segment.videoStart.toFixed(3),
-        '-t', videoDur.toFixed(3),
-        '-i', originalVideoPath,
-        '-i', segment.audioPath,
-        '-map', '0:v', '-map', '1:a',
-        '-vf', `setpts=${videoSlowFactor.toFixed(4)}*PTS`,
-        '-af', 'atempo=1.3,apad',
-        ...VIDEO_ENCODE_ARGS,
-        ...AUDIO_ARGS,
-        '-t', targetDur.toFixed(3),
-        outputPath,
-    ]);
-    return result.success ? outputPath : null;
-};
-
-/**
- * Concatenate all segment clips into the final video.
- */
-const concatenateSegments = async (
-    segmentPaths: string[],
-    outputPath: string,
-    tempDir: string,
-): Promise<boolean> => {
-    const listPath = path.join(tempDir, 'concat_list.txt');
-    const listContent = segmentPaths
-        .map(p => `file '${p.replace(/\\/g, '/')}'`)
-        .join('\n');
-    fs.writeFileSync(listPath, listContent, 'utf-8');
-
-    const result = await runFfmpeg([
-        '-y',
-        '-f', 'concat',
-        '-safe', '0',
-        '-i', listPath,
-        '-c', 'copy',
-        outputPath,
-    ]);
-
-    return result.success;
-};
-
-/**
- * Re-render the final video using HandBrakeCLI to fix frame/audio sync.
- * Uses constant framerate (CFR) mode to ensure consistent frame timing.
- */
-const rerenderWithHandBrake = async (
-    inputPath: string,
-    outputPath: string,
-    onProgress?: (percent: number) => void,
-): Promise<boolean> => {
-    return new Promise((resolve) => {
-        const handbrake = getHandBrakePath();
-        const args = [
-            '-i', inputPath,
-            '-o', outputPath,
-            '--encoder', HANDBRAKE_ENCODER,
-            '--quality', '20',
-            '--cfr',                    // Constant Framerate (quan trọng nhất!)
-            '--aencoder', 'av_aac',
-            '--ab', '192',
-            '--mixdown', 'stereo',
-            '--optimize',
-        ];
-
-        const proc = spawn(handbrake, args, { windowsHide: true });
-        let stderr = '';
-
-        proc.stdout.on('data', (data) => {
-            const line = data.toString();
-            const match = line.match(/(\d+\.?\d*)\s*%/);
-            if (match && onProgress) {
-                onProgress(parseFloat(match[1]));
-            }
-        });
-
-        proc.stderr.on('data', (data) => {
-            stderr += data.toString();
-        });
-
-        proc.on('close', (code) => {
-            if (code !== 0) {
-                console.error('HandBrake re-render stderr:', stderr);
-            }
-            resolve(code === 0);
-        });
-
-        proc.on('error', (err) => {
-            console.error('HandBrake error:', err);
-            resolve(false);
-        });
-    });
-};
-
-/**
- * Create final dubbed video.
- *
- * ALL segments are re-encoded with NVENC GPU encoder.
- * This guarantees:
- *   ✅ No frozen frames (each clip starts with proper keyframe)
- *   ✅ No missing video (frame-accurate seeking + re-encoding)
- *   ✅ No stuttering (consistent codec params for concat)
- *   ✅ Audio max 1.3x speed (natural sounding)
- *   ✅ Video slowdown when needed (smooth playback)
- *
- * 3 concurrent NVENC sessions (GPU session limit).
- * Expected: ~2 minutes for 650 segments.
- */
 export const createFinalVideo = async (
     projectPath: string,
     onProgress: (p: FinalVideoProgress) => void,
+    duckVolume: number = 0.15, // Giảm âm thanh gốc còn 15% khi có âm lồng tiếng
+    fadeDuration: number = 0.5   // Thời gian fade cho các đoạn gap (mặc định 0.5s)
 ): Promise<string | null> => {
     try {
-        await setupHardwareEncoders();
+        isCancelled = false;
+        activeProcesses = [];
+        
         const originalVideo = findOriginalVideo(projectPath);
         if (!originalVideo) {
             onProgress({ status: 'error', progress: 0, detail: 'Không tìm thấy video gốc!' });
@@ -411,11 +397,21 @@ export const createFinalVideo = async (
             return null;
         }
 
-        onProgress({ status: 'preparing', progress: 5, detail: 'Đang phân tích video và SRT...' });
+        // Tự động phân giải phần cứng
+        const hwInfo = await getHardwareInfo();
+        let HW_VIDEO_ARGS = ['-c:v', 'libx264', '-crf', '22']; // Fallback: CPU
+        
+        if (hwInfo.hasAmdGpu) {
+            HW_VIDEO_ARGS = ['-c:v', 'h264_amf', '-quality', 'quality', '-rc', 'cqp', '-qp_i', '20', '-qp_p', '20', '-qp_b', '20'];
+        } else if (hwInfo.hasNvidiaGpu) {
+            HW_VIDEO_ARGS = ['-c:v', 'h264_nvenc', '-preset', 'p4', '-rc', 'vbr', '-cq', '20', '-b:v', '0'];
+        }
+
+        onProgress({ status: 'preparing', progress: 5, detail: 'Đang chuẩn bị môi trường & phân tích file...' });
 
         const videoDuration = await getMediaDuration(originalVideo);
         if (videoDuration === 0) {
-            onProgress({ status: 'error', progress: 0, detail: 'Không thể đọc thông tin video!' });
+            onProgress({ status: 'error', progress: 0, detail: 'Không thể đọc thông tin video gốc!' });
             return null;
         }
 
@@ -423,170 +419,644 @@ export const createFinalVideo = async (
         const segments = await buildSegmentMap(srtContent, audioDir, videoDuration);
 
         if (segments.length === 0) {
-            onProgress({ status: 'error', progress: 0, detail: 'Không có đoạn nào để xử lý!' });
+            onProgress({ status: 'error', progress: 0, detail: 'Không có phân đoạn nào để xử lý!' });
             return null;
         }
 
-        const dubbedCount = segments.filter(s => s.type === 'dubbed').length;
-        const gapCount = segments.filter(s => s.type === 'gap').length;
-        let slowdownCount = 0;
-        for (const seg of segments) {
-            if (seg.type === 'dubbed' && seg.audioDuration && seg.videoDuration > 0) {
-                if (seg.audioDuration / seg.videoDuration > 1.3) slowdownCount++;
-            }
-        }
-
-        onProgress({
-            status: 'preparing',
-            progress: 10,
-            detail: `${segments.length} đoạn: ${dubbedCount} lồng tiếng, ${gapCount} gap, ${slowdownCount} giảm tốc`,
-        });
-
         const tempDir = path.join(projectPath, 'temp_final');
-        if (fs.existsSync(tempDir)) {
-            fs.rmSync(tempDir, { recursive: true, force: true });
-        }
+        
+        // FIX BUG #4: Register temp directory for cleanup
+        tempManager.register(tempDir);
+        
+        if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
         fs.mkdirSync(tempDir, { recursive: true });
 
-        const CONCURRENCY = 3;
+        // Bước 1: Trích xuất / Tổng hợp Full Original Audio (Đồng dạng 44.1kHz, Stereo, PCM)
+        onProgress({ status: 'preparing', progress: 10, detail: 'Đang chuẩn bị luồng âm thanh gốc...' });
+        const externalAudio = findOriginalAudio(projectPath);
+        const vidHasAudio = await hasAudioStream(originalVideo);
+        
+        const fullAudioWav = path.join(tempDir, 'full_audio.wav');
+        let audioPrepResult;
+
+        if (externalAudio) {
+            audioPrepResult = await runFfmpeg(['-y', '-i', externalAudio, '-ar', '44100', '-ac', '2', '-c:a', 'pcm_s16le', '-t', videoDuration.toFixed(3), fullAudioWav]);
+        } else if (vidHasAudio) {
+            audioPrepResult = await runFfmpeg(['-y', '-i', originalVideo, '-vn', '-ar', '44100', '-ac', '2', '-c:a', 'pcm_s16le', '-t', videoDuration.toFixed(3), fullAudioWav]);
+        } else {
+            // Không có auido -> Tạo file silence
+            audioPrepResult = await runFfmpeg(['-y', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo', '-t', videoDuration.toFixed(3), '-c:a', 'pcm_s16le', fullAudioWav]);
+        }
+
+        if (!audioPrepResult.success || !fs.existsSync(fullAudioWav)) {
+            onProgress({ status: 'error', progress: 15, detail: 'Lỗi khởi tạo âm thanh gốc.' });
+            return null;
+        }
+
+        // Bước 2: Tạo các chunk Audio
+        // FIX: Dynamic CONCURRENCY based on available memory
+        const os = require('os');
+        const freeMemory = os.freemem();
+        const freeMemoryGB = freeMemory / (1024 * 1024 * 1024);
+        
+        // Check minimum memory requirement
+        if (freeMemoryGB < 1.5) {
+            onProgress({ status: 'error', progress: 0, detail: `Không đủ RAM! Cần ít nhất 1.5GB RAM trống. Hiện tại: ${freeMemoryGB.toFixed(2)}GB` });
+            return null;
+        }
+        
+        // Dynamic concurrency: 4GB+ → 4 concurrent, 2-4GB → 2 concurrent, <2GB → 1 concurrent
+        const CONCURRENCY = freeMemoryGB > 4 ? 4 : (freeMemoryGB > 2 ? 2 : 1);
+        console.log(`[Memory] Free: ${freeMemoryGB.toFixed(2)}GB, CONCURRENCY: ${CONCURRENCY}`);
+        
         const segmentPaths: (string | null)[] = new Array(segments.length).fill(null);
+        const segmentTimings: (SegmentTiming | null)[] = new Array(segments.length).fill(null);
         let completed = 0;
+        let processError: string | null = null;
         const startTime = Date.now();
 
-        const processItem = async (seg: Segment, idx: number): Promise<void> => {
-            const result = await processSegment(seg, originalVideo, tempDir, idx);
-            segmentPaths[idx] = result;
+        const processAudioSegment = async (seg: Segment, idx: number): Promise<void> => {
+            if (isCancelled) throw new Error("Cancelled by user");
+            if (processError) throw new Error(processError);
+
+            const outSegWav = path.join(tempDir, `audio_seg_${String(idx).padStart(4, '0')}.wav`);
+            const targetDurFixed = seg.targetDuration.toFixed(4);
+            const startFixed = seg.videoStart.toFixed(4);
+            const origDurFixed = seg.videoDuration.toFixed(4);
+
+            if (seg.type === 'gap') {
+                // Skip gaps that are too short (< 0.1s) - they cause FFmpeg extraction issues
+                if (seg.videoDuration < 0.1) {
+                    console.log(`[Gap] Skipping very short gap segment ${idx} (${seg.videoDuration.toFixed(3)}s)`);
+                    // Create a minimal silent audio file instead
+                    const res = await runFfmpeg([
+                        '-y', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
+                        '-t', origDurFixed,
+                        '-c:a', 'pcm_s16le', outSegWav
+                    ]);
+                    if (!res.success) {
+                        const error = `Lỗi tạo silence cho Gap ngắn (t=${startFixed}): ${res.stderr}`;
+                        processError = error;
+                        throw new Error(error);
+                    }
+                    segmentPaths[idx] = outSegWav;
+                    
+                    const actualDuration = await getMediaDuration(outSegWav);
+                    segmentTimings[idx] = {
+                        expectedDuration: seg.targetDuration,
+                        actualDuration: actualDuration,
+                        drift: actualDuration - seg.targetDuration
+                    };
+                } else {
+                    // Use new fade expression helper
+                    const volExpr = createFadeExpression(seg, duckVolume, fadeDuration);
+                    
+                    // Debug logging
+                    console.log(`[Gap] Segment ${idx}: duration=${seg.targetDuration.toFixed(3)}s, fadeStart=${seg.fadeStart}, fadeEnd=${seg.fadeEnd}, volExpr=${volExpr}`);
+                    
+                    if (!validateFadeExpression(volExpr)) {
+                        const error = `Invalid fade expression for segment ${idx}`;
+                        console.error(`[Fade] ${error}`);
+                        processError = error;
+                        throw new Error(error);
+                    }
+
+                    const res = await runFfmpeg([
+                        '-y', '-ss', startFixed, '-t', origDurFixed, '-i', fullAudioWav,
+                        '-af', `volume='${volExpr}'`,
+                        '-c:a', 'pcm_s16le', outSegWav
+                    ]);
+                    if (!res.success) {
+                        const error = `Lỗi cắt âm Gap (t=${startFixed}): ${res.stderr}`;
+                        processError = error;
+                        throw new Error(error);
+                    }
+                    segmentPaths[idx] = outSegWav;
+                
+                    // Measure actual duration for sync tracking
+                    const actualDuration = await getMediaDuration(outSegWav);
+                    segmentTimings[idx] = {
+                        expectedDuration: seg.targetDuration,
+                        actualDuration: actualDuration,
+                        drift: actualDuration - seg.targetDuration
+                    };
+
+                    // Debug: Log detailed timing info for gap segment
+                    console.log(`[Audio] Segment ${idx} (${seg.type}): videoDur=${seg.videoDuration.toFixed(3)}s, targetDur=${seg.targetDuration.toFixed(3)}s, actualDur=${actualDuration.toFixed(3)}s, drift=${(actualDuration - seg.targetDuration).toFixed(3)}s`);
+                }
+            } else {
+                // Dubbed
+                if (!seg.audioPath || !seg.audioDuration || seg.audioDuration === 0) {
+                    const res = await runFfmpeg([
+                        '-y', '-ss', startFixed, '-t', origDurFixed, '-i', fullAudioWav,
+                        '-c:a', 'pcm_s16le', outSegWav
+                    ]);
+                    if (!res.success) {
+                        const error = `Lỗi Fallback Gap (t=${startFixed}): ${res.stderr}`;
+                        processError = error;
+                        throw new Error(error);
+                    }
+                    segmentPaths[idx] = outSegWav;
+
+                    // Measure actual duration for sync tracking (fallback case)
+                    const actualDuration = await getMediaDuration(outSegWav);
+                    segmentTimings[idx] = {
+                        expectedDuration: seg.targetDuration,
+                        actualDuration: actualDuration,
+                        drift: actualDuration - seg.targetDuration
+                    };
+                    
+                    // Debug: Log detailed timing info for fallback segment
+                    console.log(`[Audio] Segment ${idx} (fallback): videoDur=${seg.videoDuration.toFixed(3)}s, targetDur=${seg.targetDuration.toFixed(3)}s, actualDur=${actualDuration.toFixed(3)}s, drift=${(actualDuration - seg.targetDuration).toFixed(3)}s`);
+                    
+                    completed++;
+                    const pct = Math.round((completed / segments.length) * 40);
+                    onProgress({
+                        status: 'processing',
+                        progress: 10 + pct,
+                        detail: `Đang xử lý âm thanh đoạn ${completed}/${segments.length}...`,
+                        current: completed,
+                        total: segments.length,
+                    });
+                    return;
+                }
+
+                // Tính toán atempo cho background và dubbed
+                const bgSpeed = 1.0 / seg.videoSpeed;
+                const bgAtempo = getAtempoFilter(bgSpeed);
+                const dubbedAtempo = getAtempoFilter(seg.audioSpeed);
+
+                // Quan trọng: Thêm aresample=44100 để đồng bộ mọi stream trước khi mix
+                const bgFilter = bgAtempo ? `aresample=44100,${bgAtempo},volume=${duckVolume}` : `aresample=44100,volume=${duckVolume}`;
+                const dubbedFilter = dubbedAtempo ? `aresample=44100,${dubbedAtempo},apad` : 'aresample=44100,apad';
+                
+                const res = await runFfmpeg([
+                    '-y', 
+                    '-ss', startFixed, '-t', origDurFixed, '-i', fullAudioWav, // 0:a = Background Audio chunk
+                    '-i', seg.audioPath, // 1:a = Dubbed Audio
+                    '-filter_complex', `[0:a]${bgFilter}[bg];[1:a]${dubbedFilter}[v];[bg][v]amix=inputs=2:duration=first:dropout_transition=0,volume=2[out]`,
+                    '-map', '[out]',
+                    '-c:a', 'pcm_s16le',
+                    '-ar', '44100',
+                    '-t', targetDurFixed, // Đảm bảo output có độ dài chính xác targetDuration (sau khi đã co giãn)
+                    outSegWav
+                ]);
+
+                if (!res.success) {
+                    const error = `Lỗi Mix Dubbed #${seg.index}: ${res.stderr}`;
+                    processError = error;
+                    throw new Error(error);
+                }
+                segmentPaths[idx] = outSegWav;
+                
+                // Measure actual duration for sync tracking
+                const actualDuration = await getMediaDuration(outSegWav);
+                segmentTimings[idx] = {
+                    expectedDuration: seg.targetDuration,
+                    actualDuration: actualDuration,
+                    drift: actualDuration - seg.targetDuration
+                };
+
+                // Debug: Log detailed timing info for each segment
+                console.log(`[Audio] Segment ${idx} (${seg.type}): videoDur=${seg.videoDuration.toFixed(3)}s, targetDur=${seg.targetDuration.toFixed(3)}s, actualDur=${actualDuration.toFixed(3)}s, drift=${(actualDuration - seg.targetDuration).toFixed(3)}s`);
+            }
+
             completed++;
-
-            const elapsed = (Date.now() - startTime) / 1000;
-            const avgTime = elapsed / completed;
-            const remaining = Math.round(avgTime * (segments.length - completed));
-            const label = seg.type === 'dubbed' ? `#${seg.index}` : 'gap';
-
+            const pct = Math.round((completed / segments.length) * 40); // 10 -> 50
             onProgress({
                 status: 'processing',
-                progress: 10 + Math.round((completed / segments.length) * 78),
-                detail: `${completed}/${segments.length} (${label}) — còn ~${remaining}s`,
+                progress: 10 + pct,
+                detail: `Đang xử lý âm thanh đoạn ${completed}/${segments.length}...`,
                 current: completed,
                 total: segments.length,
             });
         };
 
-        const queue = segments.map((seg, idx) => ({ seg, idx }));
-        const activeWorkers: Promise<void>[] = [];
+        // FIX BUG #1: Use p-limit instead of manual worker management
+        const limit = pLimit(CONCURRENCY);
+        
+        const promises = segments.map((seg, idx) => 
+            limit(async () => {
+                if (isCancelled) throw new Error("Cancelled by user");
+                // Don't check processError here - let processAudioSegment handle it
+                await processAudioSegment(seg, idx);
+            })
+        );
 
-        while (queue.length > 0 || activeWorkers.length > 0) {
-            while (queue.length > 0 && activeWorkers.length < CONCURRENCY) {
-                const item = queue.shift();
-                if (!item) break;
-                const worker = processItem(item.seg, item.idx).then(() => {
-                    activeWorkers.splice(activeWorkers.indexOf(worker), 1);
-                });
-                activeWorkers.push(worker);
+        try {
+            await Promise.all(promises);
+        } catch (err: any) {
+            if (err.message === "Cancelled by user") {
+                throw err;
             }
-            if (activeWorkers.length > 0) {
-                await Promise.race(activeWorkers);
+            // If there's a processError, use it; otherwise use the caught error
+            if (processError) {
+                throw new Error(processError);
             }
+            throw err;
         }
 
         const validPaths = segmentPaths.filter((p): p is string => p !== null);
-        if (validPaths.length === 0) {
-            onProgress({ status: 'error', progress: 0, detail: 'Không thể xử lý bất kỳ đoạn nào!' });
-            fs.rmSync(tempDir, { recursive: true, force: true });
+        if (validPaths.length !== segments.length) {
+            onProgress({ status: 'error', progress: 0, detail: 'Mất mát / Lỗi khi render phân đoạn âm thanh!' });
             return null;
         }
-
-        const failedCount = segments.length - validPaths.length;
-        if (failedCount > 0) {
-            console.warn(`${failedCount} segments failed to process`);
+        
+        // FIX BUG #2: Track and report cumulative drift
+        let cumulativeDrift = 0;
+        const CORRECTION_INTERVAL = 10;
+        const DRIFT_THRESHOLD = 0.05;
+        
+        for (let i = 0; i < segmentTimings.length; i++) {
+            if (!segmentTimings[i]) continue;
+            cumulativeDrift += segmentTimings[i]!.drift;
+            
+            if ((i + 1) % CORRECTION_INTERVAL === 0 && Math.abs(cumulativeDrift) > DRIFT_THRESHOLD) {
+                console.log(`[Sync] Cumulative drift at segment ${i}: ${cumulativeDrift.toFixed(3)}s`);
+            }
         }
 
-        onProgress({
-            status: 'concatenating',
-            progress: 90,
-            detail: `Đang ghép ${validPaths.length} đoạn thành video final...`,
+        // Bước 3: Concat chuỗi âm thanh
+        onProgress({ status: 'concatenating', progress: 55, detail: 'Đang kết dính luồng âm thanh...' });
+        const listPath = path.join(tempDir, 'concat_list.txt');
+        const listContent = validPaths.map(p => `file '${p.replace(/\\/g, '/')}'`).join('\n');
+        fs.writeFileSync(listPath, listContent, 'utf-8');
+
+        const finalAudioWav = path.join(tempDir, 'final_mixed_audio.wav');
+        const concatRes = await runFfmpeg([
+            '-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c:a', 'copy', finalAudioWav
+        ]);
+
+        if (!concatRes.success || !fs.existsSync(finalAudioWav)) {
+            onProgress({ status: 'error', progress: 0, detail: `Lỗi kết nối âm thanh: ${concatRes.stderr}` });
+            return null;
+        }
+        
+        // FIX BUG #2: Final verification of audio sync
+        const totalExpected = segments.reduce((sum, s) => sum + s.targetDuration, 0);
+        const totalActual = await getMediaDuration(finalAudioWav);
+        const finalDrift = totalActual - totalExpected;
+        
+        if (Math.abs(finalDrift) > 0.1) {
+            console.warn(`[Sync] Final audio drift: ${finalDrift.toFixed(3)}s (expected: ${totalExpected.toFixed(2)}s, actual: ${totalActual.toFixed(2)}s)`);
+            onProgress({
+                status: 'concatenating',
+                progress: 58,
+                detail: `Audio concatenated (drift: ${finalDrift > 0 ? '+' : ''}${finalDrift.toFixed(2)}s)`
+            });
+        }
+        
+        // Recalculate video segment timing based on ACTUAL audio duration for EACH segment
+        // This ensures each video segment matches its corresponding audio segment timeline
+        console.log(`[Video] Recalculating each segment based on actual audio duration...`);
+        
+        // Build array of actual durations from segmentTimings
+        const actualDurations = segmentTimings.map((timing, idx) => {
+            if (timing) {
+                return timing.actualDuration;
+            }
+            return segments[idx].targetDuration;
         });
-
-        const outputDir = path.join(projectPath, 'final');
-        if (!fs.existsSync(outputDir)) {
-            fs.mkdirSync(outputDir, { recursive: true });
+        
+        // Log per-segment adjustment
+        let totalActualFromSegments = 0;
+        for (let i = 0; i < segments.length; i++) {
+            const expected = segments[i].targetDuration;
+            const actual = actualDurations[i];
+            totalActualFromSegments += actual;
+            if (expected !== actual) {
+                console.log(`[Video] Segment ${i}: expected=${expected.toFixed(3)}s, actual=${actual.toFixed(3)}s, ratio=${(actual/expected).toFixed(4)}`);
+            }
         }
+
+        // Bước 4: 1-Pass Video Encode (Chèn Final Audio vào Original Video) với Video Stretching
+        onProgress({ status: 'rerendering', progress: 60, detail: 'Đang kết xuất Video cuối cùng (áp dụng co giãn timing)...' });
+        
+        const outputDir = path.join(projectPath, 'final');
+        if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
         const outputPath = path.join(outputDir, 'final_video.mp4');
-        if (fs.existsSync(outputPath)) {
-            fs.unlinkSync(outputPath);
-        }
-
-        const concatSuccess = await concatenateSegments(validPaths, outputPath, tempDir);
-
-        try {
-            fs.rmSync(tempDir, { recursive: true, force: true });
-        } catch (cleanupError) {
-            console.warn('Could not remove temp directory:', cleanupError);
-        }
-
-        if (!concatSuccess || !fs.existsSync(outputPath)) {
-            onProgress({ status: 'error', progress: 0, detail: 'Ghép video thất bại!' });
-            return null;
-        }
-
-        onProgress({
-            status: 'rerendering',
-            progress: 92,
-            detail: 'Đang re-render video bằng HandBrake để đồng bộ khung hình & âm thanh...',
-        });
-
-        const rerenderedPath = path.join(outputDir, 'final_video_synced.mp4');
-        if (fs.existsSync(rerenderedPath)) {
-            fs.unlinkSync(rerenderedPath);
-        }
-
-        const rerenderSuccess = await rerenderWithHandBrake(
-            outputPath,
-            rerenderedPath,
-            (percent) => {
-                onProgress({
-                    status: 'rerendering',
-                    progress: 92 + Math.round(percent * 0.07),
-                    detail: `Re-rendering: ${percent.toFixed(1)}%`,
+        const fps = await getVideoFps(originalVideo);
+        
+        // FIX BUG #3: Batch processing for large number of segments
+        const BATCH_SIZE = 10; // Reduced from 30 to 10 for better stability and compatibility
+        const needsBatching = segments.length > BATCH_SIZE;
+        let encodeRes = false;
+        
+        if (needsBatching) {
+            console.log(`[Batch] Processing ${segments.length} segments in batches of ${BATCH_SIZE}`);
+            onProgress({ status: 'rerendering', progress: 60, detail: `Đang xử lý ${segments.length} đoạn video theo lô (${BATCH_SIZE} đoạn/lô)...` });
+            
+            const batchVideos: string[] = [];
+            const numBatches = Math.ceil(segments.length / BATCH_SIZE);
+            
+            for (let batchIdx = 0; batchIdx < numBatches; batchIdx++) {
+                const batchStart = batchIdx * BATCH_SIZE;
+                const batchEnd = Math.min(batchStart + BATCH_SIZE, segments.length);
+                const batchSegments = segments.slice(batchStart, batchEnd);
+                
+                console.log(`[Batch] Processing batch ${batchIdx + 1}/${numBatches} (segments ${batchStart}-${batchEnd - 1})`);
+                
+                const batchFilterChunks: string[] = [];
+                const batchConcatInputs: string[] = [];
+                
+                batchSegments.forEach((seg, localIdx) => {
+                    const globalIdx = batchStart + localIdx;
+                    const vLabel = `v${localIdx}`;
+                    const start = seg.videoStart.toFixed(4);
+                    const end = seg.videoEnd.toFixed(4);
+                    
+                    // FIX FROZEN FRAMES: Use SELECT filter instead of TRIM
+                    // SELECT works at frame-level (more accurate than TRIM which is stream-level)
+                    let filterStr = `[0:v]select='between(t,${start},${end})'`;
+                    
+                    if (seg.targetDuration < 0.001) {
+                        console.error(`[Video] Segment ${globalIdx}: Invalid targetDuration ${seg.targetDuration}, skipping speed adjustment`);
+                        filterStr += `,setpts=PTS-STARTPTS,fps=${fps.toFixed(3)}[${vLabel}]`;
+                        batchFilterChunks.push(filterStr);
+                        batchConcatInputs.push(`[${vLabel}]`);
+                        return;
+                    }
+                    
+                    // Use ONLY seg.videoSpeed (no adjustedSpeed)
+                    const totalVideoSpeed = seg.videoSpeed;
+                    
+                    // CRITICAL FIX: Combine PTS reset and speed adjustment in ONE setpts
+                    if (Math.abs(totalVideoSpeed - 1.0) > 0.001) {
+                        const ptsMultiplier = (1.0 / totalVideoSpeed).toFixed(4);
+                        // Apply speed to (PTS-STARTPTS), not to PTS directly
+                        filterStr += `,setpts=${ptsMultiplier}*(PTS-STARTPTS)`;
+                        console.log(`[VideoFilter] Batch segment ${globalIdx}: videoSpeed=${totalVideoSpeed.toFixed(4)}, setpts=${ptsMultiplier}*(PTS-STARTPTS)`);
+                    } else {
+                        // No speed adjustment, just reset PTS
+                        filterStr += `,setpts=PTS-STARTPTS`;
+                    }
+                    
+                    filterStr += `,fps=${fps.toFixed(3)}[${vLabel}]`;
+                    batchFilterChunks.push(filterStr);
+                    batchConcatInputs.push(`[${vLabel}]`);
                 });
-            },
-        );
-
-        if (rerenderSuccess && fs.existsSync(rerenderedPath)) {
-            try {
-                fs.unlinkSync(outputPath);
-                fs.renameSync(rerenderedPath, outputPath);
-            } catch (e) {
-                console.warn('Could not replace concat output with re-rendered:', e);
-            }
-        } else {
-            console.warn('HandBrake re-render failed, keeping original concat output');
-            if (fs.existsSync(rerenderedPath)) {
-                try {
-                    fs.unlinkSync(rerenderedPath);
-                } catch (cleanupError) {
-                    console.warn('Could not remove failed re-render output:', cleanupError);
+                
+                batchFilterChunks.push(`${batchConcatInputs.join('')}concat=n=${batchSegments.length}:v=1:a=0,format=yuv420p[outv]`);
+                
+                const batchFilterScriptPath = path.join(tempDir, `video_filter_batch_${batchIdx}.txt`);
+                fs.writeFileSync(batchFilterScriptPath, batchFilterChunks.join(';\n'), 'utf-8');
+                
+                const batchOutputPath = path.join(tempDir, `batch_video_${String(batchIdx).padStart(3, '0')}.mp4`);
+                
+                // FIX: Use CPU encoder for batch processing (more compatible with filter_complex)
+                // Hardware encoders may have issues with complex filter graphs
+                const batchEncodeArgs = [
+                    '-y',
+                    '-i', originalVideo,
+                    '-filter_complex_script', batchFilterScriptPath,
+                    '-map', '[outv]',
+                    '-c:v', 'libx264',
+                    '-crf', '18',
+                    '-preset', 'ultrafast',
+                    '-r', fps.toFixed(3),
+                    '-an',
+                    batchOutputPath
+                ];
+                
+                console.log(`[Batch] Encoding batch ${batchIdx + 1}/${numBatches} with CPU (libx264)...`);
+                const batchRes = await runFfmpeg(batchEncodeArgs);
+                
+                if (!batchRes.success) {
+                    console.error(`[Batch] Encoding failed for batch ${batchIdx + 1}/${numBatches}`);
+                    console.error(`[Batch] FFmpeg stderr:`, batchRes.stderr.substring(0, 500));
+                    onProgress({ status: 'error', progress: 0, detail: `Lỗi encode batch ${batchIdx + 1}` });
+                    return null;
                 }
+                
+                if (!fs.existsSync(batchOutputPath)) {
+                    console.error(`[Batch] Output file not created for batch ${batchIdx + 1}`);
+                    onProgress({ status: 'error', progress: 0, detail: `File batch ${batchIdx + 1} không được tạo` });
+                    return null;
+                }
+                
+                const batchSize = fs.statSync(batchOutputPath).size;
+                if (batchSize < 1000) {
+                    console.error(`[Batch] Batch ${batchIdx + 1} file too small: ${batchSize} bytes`);
+                    console.error(`[Batch] FFmpeg stderr:`, batchRes.stderr.substring(0, 500));
+                    onProgress({ status: 'error', progress: 0, detail: `Batch ${batchIdx + 1} encoding failed (${batchSize} bytes)` });
+                    return null;
+                }
+                
+                console.log(`[Batch] Batch ${batchIdx + 1} encoded successfully: ${(batchSize / 1024 / 1024).toFixed(2)}MB`);
+                
+                batchVideos.push(batchOutputPath);
+                
+                const batchProgress = 60 + Math.round((batchIdx + 1) / numBatches * 25);
+                onProgress({ status: 'rerendering', progress: batchProgress, detail: `Đã xử lý lô ${batchIdx + 1}/${numBatches}...` });
             }
+            
+            // Merge all batch videos
+            console.log(`[Batch] Merging ${batchVideos.length} batch videos...`);
+            onProgress({ status: 'rerendering', progress: 85, detail: 'Đang gộp các lô video...' });
+            
+            const batchListPath = path.join(tempDir, 'batch_concat_list.txt');
+            const batchListContent = batchVideos.map(p => `file '${p.replace(/\\/g, '/')}'`).join('\n');
+            fs.writeFileSync(batchListPath, batchListContent, 'utf-8');
+            
+            const mergedVideoPath = path.join(tempDir, 'merged_video.mp4');
+            const mergeRes = await runFfmpeg([
+                '-y', '-f', 'concat', '-safe', '0', '-i', batchListPath,
+                '-c:v', 'copy',
+                mergedVideoPath
+            ]);
+            
+            if (!mergeRes.success || !fs.existsSync(mergedVideoPath)) {
+                onProgress({ status: 'error', progress: 0, detail: 'Lỗi khi gộp các lô video!' });
+                return null;
+            }
+            
+            // Final mux with audio
+            console.log(`[Batch] Adding audio to merged video...`);
+            onProgress({ status: 'rerendering', progress: 90, detail: 'Đang thêm âm thanh vào video...' });
+            
+            const finalMuxRes = await runFfmpeg([
+                '-y',
+                '-i', mergedVideoPath,
+                '-i', finalAudioWav,
+                '-c:v', 'copy',
+                '-c:a', 'aac', '-b:a', '192k',
+                '-map', '0:v:0',
+                '-map', '1:a:0',
+                outputPath
+            ]);
+            
+            if (!finalMuxRes.success || !fs.existsSync(outputPath)) {
+                onProgress({ status: 'error', progress: 0, detail: 'Lỗi khi thêm âm thanh vào video!' });
+                return null;
+            }
+            
+            encodeRes = true;
+            
+        } else {
+            // Original single-pass encoding for small number of segments
+            const filterChunks: string[] = [];
+            const concatInputs: string[] = [];
+            
+            segments.forEach((seg, i) => {
+                const vLabel = `v${i}`;
+                const start = seg.videoStart.toFixed(4);
+                const end = seg.videoEnd.toFixed(4);
+                const speed = seg.videoSpeed;
+                
+                // FIX FROZEN FRAMES: Use SELECT filter instead of TRIM
+                // SELECT works at frame-level (more accurate than TRIM which is stream-level)
+                let filterStr = `[0:v]select='between(t,${start},${end})'`;
+                
+                if (seg.targetDuration < 0.001) {
+                    console.error(`[Video] Segment ${i}: Invalid targetDuration ${seg.targetDuration}, skipping speed adjustment`);
+                    filterStr += `,setpts=PTS-STARTPTS,fps=${fps.toFixed(3)}[${vLabel}]`;
+                    filterChunks.push(filterStr);
+                    concatInputs.push(`[${vLabel}]`);
+                    return;
+                }
+                
+                // Use ONLY seg.videoSpeed (no adjustedSpeed)
+                const totalVideoSpeed = seg.videoSpeed;
+                
+                // CRITICAL FIX: Combine PTS reset and speed adjustment in ONE setpts
+                if (Math.abs(totalVideoSpeed - 1.0) > 0.001) {
+                    const ptsMultiplier = (1.0 / totalVideoSpeed).toFixed(4);
+                    // Apply speed to (PTS-STARTPTS), not to PTS directly
+                    filterStr += `,setpts=${ptsMultiplier}*(PTS-STARTPTS)`;
+                    console.log(`[Video] Segment ${i} [${seg.type}]: videoSpeed=${totalVideoSpeed.toFixed(4)}, setpts=${ptsMultiplier}*(PTS-STARTPTS)`);
+                } else {
+                    // No speed adjustment, just reset PTS
+                    filterStr += `,setpts=PTS-STARTPTS`;
+                    console.log(`[Video] Segment ${i} [${seg.type}]: NO speed change (videoSpeed=1.0)`);
+                }
+                
+                filterStr += `,fps=${fps.toFixed(3)}[${vLabel}]`;
+                filterChunks.push(filterStr);
+                concatInputs.push(`[${vLabel}]`);
+            });
+            
+            filterChunks.push(`${concatInputs.join('')}concat=n=${segments.length}:v=1:a=0,format=yuv420p[outv]`);
+            
+            const filterScriptPath = path.join(tempDir, 'video_filter.txt');
+            fs.writeFileSync(filterScriptPath, filterChunks.join(';\n'), 'utf-8');
+
+            const totalTargetDuration = segments.reduce((sum, s) => sum + s.targetDuration, 0);
+
+            // FIX: Hardware encoder with fallback to CPU
+            let encodeRes = false;
+            let hwEncoderUsed = true;
+            
+            const tryEncode = async (videoArgs: string[], encoderName: string): Promise<boolean> => {
+                return new Promise<boolean>((resolve) => {
+                    const ffmpeg = getFfmpegPath();
+                    const args = [
+                        '-y',
+                        '-i', originalVideo,
+                        '-i', finalAudioWav,
+                        '-filter_complex_script', filterScriptPath,
+                        '-map', '[outv]',
+                        '-map', '1:a:0',
+                        ...videoArgs,
+                        '-r', fps.toFixed(3),
+                        '-c:a', 'aac', '-b:a', '192k',
+                        '-vsync', '1', 
+                        outputPath
+                    ];
+
+                    console.log(`[Encoder] Trying ${encoderName}...`);
+                    const proc = spawn(ffmpeg, args, { windowsHide: true });
+                    activeProcesses.push(proc);
+                    
+                    proc.stderr.on('data', (data) => {
+                        const out = data.toString();
+                        const match = out.match(/time=\s*(\d+):(\d+):(\d+)\.\d+/);
+                        if (match) {
+                            const h = parseInt(match[1]), m = parseInt(match[2]), s = parseInt(match[3]);
+                            const currDur = h * 3600 + m * 60 + s;
+                            const pct = Math.min(60 + Math.round((currDur / totalActual) * 35), 95);
+                            onProgress({ status: 'rerendering', progress: pct, detail: `Đang render video (${encoderName}): ${currDur}s / ${Math.round(totalActual)}s...` });
+                        }
+                    });
+
+                    proc.on('close', (code) => {
+                        activeProcesses = activeProcesses.filter(p => p !== proc);
+                        resolve(code === 0);
+                    });
+                    
+                    proc.on('error', (err) => {
+                        activeProcesses = activeProcesses.filter(p => p !== proc);
+                        console.error(`[Encoder] ${encoderName} error:`, err);
+                        resolve(false);
+                    });
+                });
+            };
+            
+            // Try hardware encoder first
+            try {
+                encodeRes = await tryEncode(HW_VIDEO_ARGS, hwInfo.hasAmdGpu ? 'AMD AMF' : (hwInfo.hasNvidiaGpu ? 'NVIDIA NVENC' : 'CPU'));
+                
+                if (!encodeRes) {
+                    console.warn('[Encoder] Hardware encoder failed, falling back to CPU...');
+                    hwEncoderUsed = false;
+                    
+                    // Fallback to CPU encoder
+                    const CPU_ARGS = ['-c:v', 'libx264', '-crf', '22', '-preset', 'medium'];
+                    encodeRes = await tryEncode(CPU_ARGS, 'CPU (libx264)');
+                }
+            } catch (err) {
+                console.error('[Encoder] Encoding failed:', err);
+                encodeRes = false;
+            }
+            
+            if (hwEncoderUsed && encodeRes) {
+                console.log('[Encoder] Successfully encoded with hardware acceleration');
+            } else if (encodeRes) {
+                console.log('[Encoder] Successfully encoded with CPU (hardware encoder failed)');
+            }
+        }
+
+        // FIX BUG #4: Cleanup temp directory (including batch files)
+        // DISABLED FOR DEBUGGING - Keep batch files to analyze
+        // if (needsBatching) {
+        //     console.log('[Cleanup] Removing batch video files...');
+        //     const batchFiles = fs.readdirSync(tempDir).filter(f => f.startsWith('batch_video_') || f.startsWith('video_filter_batch_'));
+        //     for (const file of batchFiles) {
+        //         try {
+        //             fs.unlinkSync(path.join(tempDir, file));
+        //         } catch (e) {
+        //             console.warn(`[Cleanup] Failed to remove ${file}:`, e);
+        //         }
+        //     }
+        // }
+        
+        console.log('[Debug] Batch files kept for analysis in temp_final/');
+        
+        tempManager.unregister(tempDir);
+        await tempManager.cleanup();
+
+        if (!encodeRes || !fs.existsSync(outputPath)) {
+            onProgress({ status: 'error', progress: 0, detail: 'Lỗi khi gắn luồng âm thanh vào video!' });
+            return null;
         }
 
         const totalTime = Math.round((Date.now() - startTime) / 1000);
-        onProgress({
-            status: 'done',
-            progress: 100,
-            detail: `Hoàn tất! Video final đã được tạo (${totalTime}s).`,
-        });
+        onProgress({ status: 'done', progress: 100, detail: `Hoạt tất tuyệt đối! Render mất ${totalTime}s.` });
 
         return outputPath;
 
-    } catch (err) {
+    } catch (err: any) {
+        // FIX BUG #4: Cleanup on error
+        const tempDir = path.join(projectPath, 'temp_final');
+        tempManager.unregister(tempDir);
+        await tempManager.cleanup();
+        
+        if (err.message === "Cancelled by user") {
+            onProgress({ status: 'error', progress: 0, detail: `Đã huỷ xuất video!` });
+            return null;
+        }
         console.error('Create final video failed:', err);
-        onProgress({
-            status: 'error',
-            progress: 0,
-            detail: `Lỗi: ${err}`,
-        });
+        onProgress({ status: 'error', progress: 0, detail: `Lỗi System: ${err}` });
         return null;
     }
 };

@@ -124,6 +124,15 @@ export const startVideoServer = () => {
             }
         });
 
+        server.on("error", (err: any) => {
+            if (err.code === "EADDRINUSE") {
+                console.warn("[VideoServerService] Port 9999 is already in use. Server may already be running.");
+                resolve(); // Resolve anyway, as the server is presumably up
+            } else {
+                console.error("[VideoServerService] Server error:", err);
+            }
+        });
+
         server.listen(9999, "127.0.0.1", () => {
             console.log("Video server started on http://127.0.0.1:9999");
             resolve();

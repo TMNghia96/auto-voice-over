@@ -14,11 +14,25 @@ const App = () => {
   const { fetchHardwareInfo } = useHardwareStore();
 
   useEffect(() => {
+    console.log("[Renderer] Starting initialization...");
     fetchHardwareInfo();
-    window.api.checkEnvironment().then((ready) => {
+
+    // Create a timeout to ensure we don't stay on a blank screen forever
+    const timeoutId = setTimeout(() => {
+      console.warn("[Renderer] Environment check timed out after 5s. Proceeding anyway.");
+      setIsChecking(false);
+    }, 5000);
+
+    window.api.checkEnvironment().then((ready: boolean) => {
+      console.log("[Renderer] Environment check result:", ready);
+      clearTimeout(timeoutId);
       if (ready) {
         setIsReady(true);
       }
+      setIsChecking(false);
+    }).catch((err: any) => {
+      console.error("[Renderer] Environment check failed:", err);
+      clearTimeout(timeoutId);
       setIsChecking(false);
     });
   }, []);

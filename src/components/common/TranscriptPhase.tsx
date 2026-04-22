@@ -11,8 +11,9 @@ import { useProcessContext } from "@/stores/ProcessStore";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 import { useHardwareStore } from "@/stores/HardwareStore";
+import { matchesProjectId } from "@/lib/BrowserPathUtils";
 
-type TranscriptEngine = 'whisper-cpu' | 'whisper-gpu' | 'whisper-vulkan' | 'assemblyai';
+type TranscriptEngine = 'whisper-cpu' | 'whisper-gpu' | 'whisper-openblas';
 
 interface EngineOption {
     id: TranscriptEngine;
@@ -35,9 +36,9 @@ interface TranscriptProgress {
 const ENGINES: EngineOption[] = [
     {
         id: 'whisper-cpu',
-        name: 'Whisper',
-        subtitle: 'CPU',
-        description: 'Chạy trên CPU, tương thích với mọi máy tính',
+        name: 'WhisperX',
+        subtitle: 'CPU Cơ bản',
+        description: 'Chạy trên CPU với độ tối ưu float32',
         icon: <Cpu className="w-6 h-6" />,
         color: 'text-blue-500',
         bgColor: 'bg-blue-500/10',
@@ -45,21 +46,10 @@ const ENGINES: EngineOption[] = [
         disabled: false
     },
     {
-        id: 'whisper-gpu',
-        name: 'Whisper',
-        subtitle: 'Card NVIDIA',
-        description: 'Tăng tốc bằng CUDA, nhanh hơn 5-10 lần',
-        icon: <Zap className="w-6 h-6" />,
-        color: 'text-green-500',
-        bgColor: 'bg-green-500/10',
-        borderColor: 'border-green-500/50',
-        disabled: false
-    },
-    {
-        id: 'whisper-vulkan',
-        name: 'Whisper',
-        subtitle: 'AMD / NVIDIA / Intel',
-        description: 'Sử dụng Vulkan, hỗ trợ đa số card đồ họa rời',
+        id: 'whisper-openblas',
+        name: 'WhisperX',
+        subtitle: 'CPU Tăng tốc',
+        description: 'Sử dụng CPU đa nhân INT8',
         icon: <Sparkles className="w-6 h-6" />,
         color: 'text-orange-500',
         bgColor: 'bg-orange-500/10',
@@ -67,15 +57,15 @@ const ENGINES: EngineOption[] = [
         disabled: false
     },
     {
-        id: 'assemblyai',
-        name: 'AssemblyAI',
-        subtitle: 'Cloud API',
-        description: 'API Đám mây, độ chính xác cao, yêu cầu API key',
-        icon: <Cloud className="w-6 h-6" />,
-        color: 'text-purple-500',
-        bgColor: 'bg-purple-500/10',
-        borderColor: 'border-purple-500/50',
-        disabled: true
+        id: 'whisper-gpu',
+        name: 'WhisperX',
+        subtitle: 'Card NVIDIA',
+        description: 'Siêu tốc độ với CUDNN / CuBLAS GPU',
+        icon: <Zap className="w-6 h-6" />,
+        color: 'text-green-500',
+        bgColor: 'bg-green-500/10',
+        borderColor: 'border-green-500/50',
+        disabled: false
     },
 ];
 
@@ -94,13 +84,13 @@ export const TranscriptPhase = ({ onComplete }: { onComplete?: () => void }) => 
     const [audioUrl, setAudioUrl] = useState<string>("");
     const [isPlaying, setIsPlaying] = useState(false);
     const [activeSegment, setActiveSegment] = useState<number | null>(null);
-    const { hasNvidiaGpu, hasVulkanGpu } = useHardwareStore();
+    const { hasNvidiaGpu } = useHardwareStore();
 
-    const [selectedEngine, setSelectedEngine] = useState<TranscriptEngine>('whisper-cpu');
+    const [selectedEngine, setSelectedEngine] = useState<TranscriptEngine>('whisper-openblas');
     const [engineStatus, setEngineStatus] = useState<Record<string, boolean>>({
         cpu: false,
         gpu: false,
-        vulkan: false
+        openblas: false
     });
     const [models, setModels] = useState<any[]>([]);
     const [activeModel, setActiveModel] = useState<string>("");
@@ -120,13 +110,13 @@ export const TranscriptPhase = ({ onComplete }: { onComplete?: () => void }) => 
 
     const checkEngines = async () => {
         try {
-            const [cpuReady, gpuReady, vulkanReady] = await Promise.all([
+            const [cpuReady, gpuReady, openblasReady] = await Promise.all([
                 window.api.checkWhisperEngine('cpu'),
                 window.api.checkWhisperEngine('gpu'),
-                window.api.checkWhisperEngine('vulkan'),
+                window.api.checkWhisperEngine('openblas'),
             ]);
-            console.log("[TranscriptPhase] Engine status:", { cpu: cpuReady, gpu: gpuReady, vulkan: vulkanReady });
-            setEngineStatus({ cpu: cpuReady, gpu: gpuReady, vulkan: vulkanReady });
+            console.log("[TranscriptPhase] Engine status:", { cpu: cpuReady, gpu: gpuReady, openblas: openblasReady });
+            setEngineStatus({ cpu: cpuReady, gpu: gpuReady, openblas: openblasReady });
         } catch (err) {
             console.error("Failed to check engines:", err);
         }
@@ -145,32 +135,43 @@ export const TranscriptPhase = ({ onComplete }: { onComplete?: () => void }) => 
         }
     };
 
+
     useEffect(() => {
         const init = async () => {
-            const projects = await window.api.getProjects();
-            const project = projects.find((p: any) => p.id === id);
-            if (project) {
-                setProjectPath(project.path);
+            try {
+                const projects = await window.api.getProjects();
+                const project = projects.find((p: any) => matchesProjectId(p, id));
+                if (project) {
+                    setProjectPath(project.path);
 
-                const existing = await window.api.getExistingSrt(project.path);
-                if (existing) {
-                    setSrtEntries(parseSrt(existing.srtContent));
-                    setSrtPath(existing.srtPath);
-                    setPhase("done");
-                    loadAudio(project.path);
+                    const existing = await window.api.getExistingSrt(project.path);
+                    if (existing) {
+                        setSrtEntries(parseSrt(existing.srtContent));
+                        setSrtPath(existing.srtPath);
+                        setPhase("done");
+                        loadAudio(project.path);
+                    }
+                } else {
+                    console.error("[TranscriptPhase] Project not found for ID:", id);
                 }
+                await checkEngines();
+
+                const loadedModels = await window.api.listWhisperModels();
+                const activeId = await window.api.getActiveWhisperModel();
+                setModels(loadedModels);
+                setActiveModel(activeId);
+            } catch (err) {
+                console.error("[TranscriptPhase] Init failed:", err);
+                setPhase("error");
+                setProgress(prev => ({ ...prev, detail: String(err) }));
+            } finally {
+                setIsChecking(false);
             }
-            await checkEngines();
-
-            const loadedModels = await window.api.listWhisperModels();
-            const activeId = await window.api.getActiveWhisperModel();
-            setModels(loadedModels);
-            setActiveModel(activeId);
-
-            setIsChecking(false);
         };
 
-        init();
+        if (id) {
+            init();
+        }
 
         window.api.onTranscriptProgress((data: TranscriptProgress) => {
             setProgress(data);
@@ -192,7 +193,6 @@ export const TranscriptPhase = ({ onComplete }: { onComplete?: () => void }) => 
 
         return () => {
             window.api.removeTranscriptListeners();
-            window.api.removeCompileListeners();
             if (audioUrl) {
                 URL.revokeObjectURL(audioUrl);
             }
@@ -294,34 +294,10 @@ export const TranscriptPhase = ({ onComplete }: { onComplete?: () => void }) => 
     const getEngineStatusKey = (engineId: TranscriptEngine): string => {
         if (engineId === 'whisper-cpu') return 'cpu';
         if (engineId === 'whisper-gpu') return 'gpu';
-        if (engineId === 'whisper-vulkan') return 'vulkan';
+        if (engineId === 'whisper-openblas') return 'openblas';
         return '';
     };
 
-    const handleCompileVulkan = () => {
-        if (isCompiling) return;
-        setIsCompiling(true);
-        setCompileProgress({ step: 'prepare', message: 'Đang chuẩn bị...', progress: 0 });
-
-        window.api.onCompileProgress((progress) => {
-            setCompileProgress({
-                step: progress.step,
-                message: progress.message,
-                progress: progress.progress,
-            });
-        });
-
-        window.api.onCompileComplete((result) => {
-            setIsCompiling(false);
-            setCompileProgress(null);
-            window.api.removeCompileListeners();
-            if (result.success) {
-                checkEngines();
-            }
-        });
-
-        window.api.compileWhisperVulkan();
-    };
 
     const handleModelSelect = async (modelId: string) => {
         setActiveModel(modelId);
@@ -330,17 +306,34 @@ export const TranscriptPhase = ({ onComplete }: { onComplete?: () => void }) => 
 
     if (isChecking) {
         return (
-            <div className="flex items-center justify-center h-full">
+            <div className="flex flex-col items-center justify-center h-full gap-4">
                 <Spinner className="w-8 h-8 animate-spin text-primary" />
-                <span className="ml-2 text-sm text-muted-foreground">Đang kiểm tra môi trường...</span>
+                <span className="text-sm text-muted-foreground animate-pulse">Đang định cấu hình môi trường...</span>
+            </div>
+        );
+    }
+
+    if (!projectPath && phase !== "error") {
+        return (
+            <div className="flex flex-col items-center justify-center h-full p-4 text-center space-y-4">
+                <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center">
+                    <AlertCircle className="w-8 h-8 text-muted-foreground" />
+                </div>
+                <div className="space-y-1">
+                    <h2 className="text-xl font-bold">Không tìm thấy dự án</h2>
+                    <p className="text-sm text-muted-foreground">ID dự án không hợp lệ hoặc đã bị di chuyển.</p>
+                </div>
+                <Button variant="outline" onClick={() => window.location.href = '/'}>
+                    Quay lại Trang chủ
+                </Button>
             </div>
         );
     }
 
     return (
-        <div className="flex flex-col items-center justify-center p-4 space-y-4 max-w-7xl w-full mx-auto h-full">
+        <div className="flex flex-col items-center justify-center p-4 space-y-4 max-w-7xl w-full mx-auto h-full min-h-[400px]">
 
-            { }
+            {/* Idle Phase: Engine Selection */}
             {phase === "idle" && (
                 <div className="flex flex-col items-center gap-8 animate-in fade-in duration-300 w-full max-w-3xl">
                     <div className="grid grid-cols-3 gap-4 w-full">
@@ -348,19 +341,18 @@ export const TranscriptPhase = ({ onComplete }: { onComplete?: () => void }) => 
                             const isSelected = selectedEngine === engine.id;
                             const statusKey = getEngineStatusKey(engine.id);
                             const isReady = statusKey ? engineStatus[statusKey] : false;
+                            const isDisabled = engine.disabled || (engine.id === 'whisper-gpu' && !hasNvidiaGpu);
 
                             return (
                                 <button
                                     key={engine.id}
-                                    disabled={engine.disabled || (engine.id === 'whisper-gpu' && !hasNvidiaGpu) || (engine.id === 'whisper-vulkan' && !hasVulkanGpu)}
+                                    disabled={isDisabled}
                                     onClick={() => {
-                                        const disabled = engine.disabled || (engine.id === 'whisper-gpu' && !hasNvidiaGpu) || (engine.id === 'whisper-vulkan' && !hasVulkanGpu);
-                                        console.log(`[TranscriptPhase] Engine button clicked: ${engine.id}, disabled: ${disabled}`);
-                                        if (!disabled) setSelectedEngine(engine.id);
+                                        if (!isDisabled) setSelectedEngine(engine.id);
                                     }}
                                     className={`
                                         relative flex flex-col items-center text-center p-6 rounded-xl border-2 transition-all duration-200 cursor-pointer
-                                        ${engine.disabled
+                                        ${isDisabled
                                             ? 'opacity-50 cursor-not-allowed border-border bg-muted/30'
                                             : isSelected
                                                 ? `${engine.borderColor} bg-card shadow-lg scale-[1.02]`
@@ -368,38 +360,33 @@ export const TranscriptPhase = ({ onComplete }: { onComplete?: () => void }) => 
                                         }
                                     `}
                                 >
-                                    { }
-                                    {isSelected && !engine.disabled && (
+                                    {/* Selected Indicator */}
+                                    {isSelected && !isDisabled && (
                                         <div className="absolute top-2.5 right-2.5 w-5 h-5 rounded-full bg-primary flex items-center justify-center">
                                             <Check className="w-3 h-3 text-primary-foreground" />
                                         </div>
                                     )}
 
-                                    { }
+                                    {/* Icon */}
                                     <div className={`w-14 h-14 rounded-xl ${engine.bgColor} flex items-center justify-center mb-4 ${engine.color}`}>
                                         {engine.icon}
                                     </div>
 
-                                    { }
+                                    {/* Name & Subtitle */}
                                     <h3 className="font-semibold text-base">{engine.name}</h3>
                                     <span className={`text-xs font-medium ${engine.color} mb-2`}>{engine.subtitle}</span>
 
-                                    { }
+                                    {/* Description */}
                                     <p className="text-xs text-muted-foreground leading-relaxed mb-4 min-h-[2.5rem]">
                                         {engine.description}
                                     </p>
 
-                                    { }
-                                    {engine.disabled || (engine.id === 'whisper-gpu' && !hasNvidiaGpu) || (engine.id === 'whisper-vulkan' && !hasVulkanGpu) ? (
-                                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-muted text-muted-foreground border">
-                                            {engine.id === 'whisper-gpu' && !hasNvidiaGpu ? "Không hỗ trợ CUDA" :
-                                                engine.id === 'whisper-vulkan' && !hasVulkanGpu ? "Không hỗ trợ GPU" : "Sắp có"}
-                                        </span>
-                                    ) : (engine.id === 'whisper-cpu' || engine.id === 'whisper-gpu') ? (
-                                        <div
-                                            onClick={(e) => e.stopPropagation()}
-                                            className="w-full mt-auto flex justify-center px-4"
-                                        >
+                                    {/* Model Selection & Status */}
+                                    <div
+                                        onClick={(e) => e.stopPropagation()}
+                                        className="w-full mt-auto flex flex-col items-center gap-3 px-4"
+                                    >
+                                        {!isDisabled && (
                                             <Select
                                                 value={activeModel}
                                                 onValueChange={handleModelSelect}
@@ -420,86 +407,24 @@ export const TranscriptPhase = ({ onComplete }: { onComplete?: () => void }) => 
                                                     )}
                                                 </SelectContent>
                                             </Select>
-                                        </div>
-                                    ) : engine.id === 'whisper-vulkan' ? (
-                                        <div className="flex flex-col items-center gap-3 w-full">
-                                            <div
-                                                onClick={(e) => e.stopPropagation()}
-                                                className="w-full flex justify-center px-4"
-                                            >
-                                                <Select
-                                                    value={activeModel}
-                                                    onValueChange={handleModelSelect}
-                                                >
-                                                    <SelectTrigger className="h-7 w-auto min-w-[130px] rounded-full text-[11px] font-medium bg-background/50 border-primary/20 hover:border-primary/50 shadow-sm flex items-center justify-between gap-2 px-3">
-                                                        <SelectValue placeholder="Chọn model" />
-                                                    </SelectTrigger>
-                                                    <SelectContent>
-                                                        {models.filter(m => m.downloaded).map(m => (
-                                                            <SelectItem key={m.id} value={m.id} className="text-xs">
-                                                                {m.name}
-                                                            </SelectItem>
-                                                        ))}
-                                                        {models.filter(m => m.downloaded).length === 0 && (
-                                                            <SelectItem value="none" disabled className="text-xs">
-                                                                Vui lòng tải model trước
-                                                            </SelectItem>
-                                                        )}
-                                                    </SelectContent>
-                                                </Select>
-                                            </div>
+                                        )}
 
-                                            {isCompiling ? (
-                                                <div className="w-full space-y-1 px-2">
-                                                    <div className="flex items-center gap-1.5">
-                                                        <Spinner className="w-3 h-3 animate-spin text-orange-500" />
-                                                        <span className="text-[10px] text-orange-600 font-medium truncate">
-                                                            {compileProgress?.message || 'Đang cài đặt...'}
-                                                        </span>
-                                                    </div>
-                                                    <Progress value={compileProgress?.progress || 0} className="w-full h-1" />
-                                                </div>
-                                            ) : isReady ? (
-                                                <div className="flex items-center gap-2">
-                                                    <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-green-500/10 text-green-600 border border-green-500/20">
-                                                        <Check className="w-3 h-3" />
-                                                        Sẵn sàng
-                                                    </span>
-                                                    <button
-                                                        onClick={(e) => {
-                                                            e.stopPropagation();
-                                                            handleCompileVulkan();
-                                                        }}
-                                                        title="Cài đặt lại công cụ"
-                                                        className="p-1 rounded-full hover:bg-orange-500/10 text-orange-600 border border-transparent hover:border-orange-500/20 transition-colors"
-                                                    >
-                                                        <RotateCcw className="w-3 h-3" />
-                                                    </button>
-                                                </div>
-                                            ) : (
-                                                <button
-                                                    onClick={(e) => {
-                                                        e.stopPropagation();
-                                                        handleCompileVulkan();
-                                                    }}
-                                                    className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-orange-500/10 text-orange-600 border border-orange-500/20 hover:bg-orange-500/20 transition-colors cursor-pointer"
-                                                >
-                                                    <Wrench className="w-3 h-3" />
-                                                    Tự cài đặt
-                                                </button>
-                                            )}
-                                        </div>
-                                    ) : isReady ? (
-                                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-green-500/10 text-green-600 border border-green-500/20">
-                                            <Check className="w-3 h-3" />
-                                            Sẵn sàng
-                                        </span>
-                                    ) : (
-                                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-amber-500/10 text-amber-600 border border-amber-500/20">
-                                            <Download className="w-3 h-3" />
-                                            Cần tải xuống
-                                        </span>
-                                    )}
+                                        {isDisabled ? (
+                                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-muted text-muted-foreground border">
+                                                Không hỗ trợ CUDA
+                                            </span>
+                                        ) : isReady ? (
+                                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-green-500/10 text-green-600 border border-green-500/20">
+                                                <Check className="w-3 h-3" />
+                                                Sẵn sàng
+                                            </span>
+                                        ) : (
+                                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-medium bg-amber-500/10 text-amber-600 border border-amber-500/20">
+                                                <Download className="w-3 h-3" />
+                                                Cần tải xuống
+                                            </span>
+                                        )}
+                                    </div>
                                 </button>
                             );
                         })}
@@ -550,7 +475,7 @@ export const TranscriptPhase = ({ onComplete }: { onComplete?: () => void }) => 
                 </div>
             )}
 
-            { }
+            {/* Processing Phase */}
             {phase === "processing" && (
                 <div className="flex flex-col items-center gap-6 w-full max-w-lg animate-in fade-in duration-300">
                     <div className="text-center space-y-1">
@@ -562,7 +487,7 @@ export const TranscriptPhase = ({ onComplete }: { onComplete?: () => void }) => 
                 </div>
             )}
 
-            { /* Error Phase */}
+            {/* Error Phase */}
             {phase === "error" && (
                 <div className="flex flex-col items-center gap-6 w-full max-w-lg animate-in fade-in duration-300">
                     <div className="text-center space-y-4">
@@ -585,10 +510,10 @@ export const TranscriptPhase = ({ onComplete }: { onComplete?: () => void }) => 
                 </div>
             )}
 
-            { }
+            {/* Done Phase: Result Display */}
             {phase === "done" && srtEntries.length > 0 && (
                 <div className="w-full h-full flex flex-col gap-4 animate-in fade-in duration-300 overflow-hidden">
-                    { }
+                    {/* Header Action Bar */}
                     <div className="flex items-center justify-between shrink-0">
                         <div className="flex items-center gap-3">
                             <CheckCircle2 className="w-5 h-5 text-green-500" />
@@ -619,9 +544,9 @@ export const TranscriptPhase = ({ onComplete }: { onComplete?: () => void }) => 
                         </div>
                     </div>
 
-                    { }
+                    {/* Main Content Area */}
                     <div className="flex-1 flex gap-4 overflow-hidden min-h-0">
-                        { }
+                        {/* Audio Player Card */}
                         <div className="w-[30%] shrink-0 flex flex-col">
                             <div className="bg-card border rounded-xl shadow-sm flex flex-col overflow-hidden h-full">
                                 <div className="flex items-center gap-2 p-4 border-b bg-muted/50">
@@ -673,7 +598,7 @@ export const TranscriptPhase = ({ onComplete }: { onComplete?: () => void }) => 
                             </div>
                         </div>
 
-                        { }
+                        {/* SRT Scroll List */}
                         <div className="flex-1 min-w-0 flex flex-col border rounded-xl shadow-sm overflow-hidden bg-card">
                             <div
                                 ref={listRef}
@@ -725,7 +650,7 @@ export const TranscriptPhase = ({ onComplete }: { onComplete?: () => void }) => 
                 </div>
             )}
 
-            { }
+            {/* Empty State */}
             {phase === "done" && srtEntries.length === 0 && (
                 <div className="text-center space-y-4 animate-in fade-in duration-300">
                     <p className="text-muted-foreground">Không tìm thấy nội dung phụ đề.</p>

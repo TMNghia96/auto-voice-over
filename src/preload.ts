@@ -61,14 +61,8 @@ contextBridge.exposeInMainWorld('api', {
 
     checkWhisperEngine: (engine: string) => ipcRenderer.invoke('check-whisper-engine', engine),
 
-    compileWhisperVulkan: () => ipcRenderer.send('compile-whisper-vulkan'),
-    onCompileProgress: (callback: (progress: any) => void) => ipcRenderer.on('compile-progress', (_, progress) => callback(progress)),
-    onCompileComplete: (callback: (result: any) => void) => ipcRenderer.on('compile-complete', (_, result) => callback(result)),
-    removeCompileListeners: () => {
-        ipcRenderer.removeAllListeners('compile-progress');
-        ipcRenderer.removeAllListeners('compile-complete');
-        ipcRenderer.removeAllListeners('compile-console');
-    },
+
+
 
     getWhisperDownloadStatus: () => ipcRenderer.invoke('get-whisper-download-status'),
     listWhisperModels: () => ipcRenderer.invoke('list-whisper-models'),
@@ -93,10 +87,18 @@ contextBridge.exposeInMainWorld('api', {
     readVideoFile: (filePath: string) => ipcRenderer.invoke('read-video-file', filePath),
 
     checkFinalVideoReady: (projectPath: string) => ipcRenderer.invoke('check-final-video-ready', projectPath),
-    createFinalVideo: (projectPath: string) => ipcRenderer.send('create-final-video', projectPath),
+    createFinalVideo: (projectPath: string, options?: { backgroundVolume?: number, fadeDuration?: number }) => ipcRenderer.send('create-final-video', projectPath, options),
+    cancelFinalVideo: () => ipcRenderer.send('cancel-final-video'),
     onFinalVideoProgress: (callback: (progress: any) => void) => ipcRenderer.on('final-video-progress', (_, progress) => callback(progress)),
     removeFinalVideoListeners: () => ipcRenderer.removeAllListeners('final-video-progress'),
     openInExplorer: (filePath: string) => ipcRenderer.invoke('open-in-explorer', filePath),
     openFile: (filePath: string) => ipcRenderer.invoke('open-file', filePath),
     checkProjectPhases: (projectPath: string) => ipcRenderer.invoke('check-project-phases', projectPath),
+
+    mcpGetStatus: () => ipcRenderer.invoke('mcp-get-status'),
+
+    getDefaultBackgroundVolume: () => ipcRenderer.invoke('get-default-background-volume'),
+    setDefaultBackgroundVolume: (volume: number) => ipcRenderer.invoke('set-default-background-volume', volume),
+    getDefaultFadeDuration: () => ipcRenderer.invoke('get-default-fade-duration'),
+    setDefaultFadeDuration: (duration: number) => ipcRenderer.invoke('set-default-fade-duration', duration),
 });

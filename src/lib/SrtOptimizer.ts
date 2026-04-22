@@ -1,8 +1,8 @@
 import fs from 'fs';
 
-interface SrtSegment {
+export interface SrtEntry {
     index: number;
-    startTime: string;  // "HH:MM:SS,mmm"
+    startTime: string;
     endTime: string;
     text: string;
 }
@@ -28,35 +28,7 @@ const msToTime = (ms: number): string => {
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(msPart).padStart(3, '0')}`;
 };
 
-/**
- * Parse an SRT file content into segments
- */
-const parseSrtContent = (content: string): SrtSegment[] => {
-    const segments: SrtSegment[] = [];
-    const blocks = content.trim().split(/\r?\n\r?\n/);
-
-    for (const block of blocks) {
-        const lines = block.trim().split(/\r?\n/);
-        if (lines.length < 3) continue;
-
-        const index = parseInt(lines[0]);
-        if (isNaN(index)) continue;
-
-        const timeMatch = lines[1].match(/(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})/);
-        if (!timeMatch) continue;
-
-        const text = lines.slice(2).join(' ').trim();
-
-        segments.push({
-            index,
-            startTime: timeMatch[1],
-            endTime: timeMatch[2],
-            text,
-        });
-    }
-
-    return segments;
-};
+const ABBREVIATIONS = new Set(['mr', 'mrs', 'ms', 'dr', 'prof', 'vs', 'etc', 'ie', 'eg', 'đ', 'ông', 'bà', 'anh', 'chị']);
 
 /**
  * Check if a character position is at a sentence boundary
@@ -64,10 +36,23 @@ const parseSrtContent = (content: string): SrtSegment[] => {
 const isSentenceEnd = (text: string, pos: number): boolean => {
     if (pos < 0 || pos >= text.length) return false;
     const char = text[pos];
+
     if (char === '.' || char === '!' || char === '?') {
+        // Check for abbreviations if the character is a period
+        if (char === '.') {
+            let wordStart = pos - 1;
+            while (wordStart >= 0 && /[a-zA-ZáàảãạâấầẩẫậăắằẳẵặéèẻẽẹêếềểễệíìỉĩịóòỏõọôốồổỗộơớờởỡợúùủũụưứừửữựýỳỷỹỵđĐ]/.test(text[wordStart])) {
+                wordStart--;
+            }
+            const word = text.substring(wordStart + 1, pos).toLowerCase();
+            if (ABBREVIATIONS.has(word)) return false;
+        }
+
         const nextChar = pos + 1 < text.length ? text[pos + 1] : ' ';
         const nextNextChar = pos + 2 < text.length ? text[pos + 2] : '';
-        if (nextChar === ' ' && (nextNextChar === '' || /[A-Z"'\u201C\u201D]/.test(nextNextChar))) {
+
+        // Added Unicode uppercase support \p{Lu}
+        if (nextChar === ' ' && (nextNextChar === '' || /[\p{Lu}"'\u201C\u201D]/u.test(nextNextChar))) {
             return true;
         }
         if (pos === text.length - 1) return true;
@@ -85,227 +70,6 @@ const interpolateTime = (startMs: number, endMs: number, charPos: number, totalC
     return Math.round(startMs + (endMs - startMs) * ratio);
 };
 
-const MAX_SEGMENT_DURATION_MS = 12000;
-const MIN_SEGMENT_DURATION_MS = 1500;
-
-/**
- * Optimize SRT segments by re-splitting at sentence boundaries.
- * 
- * Strategy:
- * 1. Merge all segments into a continuous stream with character-level timing
- * 2. Find sentence boundaries in the merged text
- * 3. Create new segments that align with sentence boundaries
- * 4. If a sentence is too long, split at comma/conjunction boundaries
- */
-export const optimizeSrt = (srtContent: string): string => {
-    const originalSegments = parseSrtContent(srtContent);
-    if (originalSegments.length === 0) return srtContent;
-
-    interface CharTimeInfo {
-        char: string;
-        timeMs: number;
-    }
-
-    const charTimeline: CharTimeInfo[] = [];
-
-    for (const seg of originalSegments) {
-        const startMs = timeToMs(seg.startTime);
-        const endMs = timeToMs(seg.endTime);
-        const text = seg.text.trim();
-
-        for (let i = 0; i < text.length; i++) {
-            charTimeline.push({
-                char: text[i],
-                timeMs: interpolateTime(startMs, endMs, i, text.length),
-            });
-        }
-
-        if (charTimeline.length > 0) {
-            const lastTime = charTimeline[charTimeline.length - 1].timeMs;
-            charTimeline.push({ char: ' ', timeMs: lastTime });
-        }
-    }
-
-    if (charTimeline.length === 0) return srtContent;
-
-    const fullText = charTimeline.map(c => c.char).join('');
-
-    const splitPoints: number[] = []; // character indices where we should split (after this index)
-
-    for (let i = 0; i < fullText.length; i++) {
-        if (isSentenceEnd(fullText, i)) {
-            splitPoints.push(i + 1); // Split after the punctuation + the space
-        }
-    }
-
-    interface TextSpan {
-        startIdx: number;
-        endIdx: number;
-        text: string;
-        startMs: number;
-        endMs: number;
-    }
-
-    const sentenceSpans: TextSpan[] = [];
-    let lastSplit = 0;
-
-    for (const splitIdx of splitPoints) {
-        let actualEnd = splitIdx;
-        while (actualEnd < fullText.length && fullText[actualEnd] === ' ') {
-            actualEnd++;
-        }
-
-        if (actualEnd > lastSplit) {
-            const text = fullText.substring(lastSplit, splitIdx).trim();
-            if (text.length > 0) {
-                sentenceSpans.push({
-                    startIdx: lastSplit,
-                    endIdx: splitIdx - 1,
-                    text,
-                    startMs: charTimeline[lastSplit]?.timeMs || 0,
-                    endMs: charTimeline[Math.min(splitIdx - 1, charTimeline.length - 1)]?.timeMs || 0,
-                });
-            }
-        }
-        lastSplit = actualEnd;
-    }
-
-    if (lastSplit < fullText.length) {
-        const text = fullText.substring(lastSplit).trim();
-        if (text.length > 0) {
-            sentenceSpans.push({
-                startIdx: lastSplit,
-                endIdx: fullText.length - 1,
-                text,
-                startMs: charTimeline[lastSplit]?.timeMs || 0,
-                endMs: charTimeline[charTimeline.length - 1]?.timeMs || 0,
-            });
-        }
-    }
-
-    const finalSpans: TextSpan[] = [];
-
-    for (const span of sentenceSpans) {
-        const duration = span.endMs - span.startMs;
-
-        if (duration <= MAX_SEGMENT_DURATION_MS) {
-            finalSpans.push(span);
-            continue;
-        }
-
-        const subSplitPoints: number[] = [];
-        const text = fullText.substring(span.startIdx, span.endIdx + 1);
-
-        for (let i = 0; i < text.length; i++) {
-            const globalIdx = span.startIdx + i;
-            const char = text[i];
-
-            if (char === ',' && i + 1 < text.length && text[i + 1] === ' ') {
-                const posMs = charTimeline[globalIdx]?.timeMs || 0;
-                const durationFromStart = posMs - span.startMs;
-                if (durationFromStart >= MIN_SEGMENT_DURATION_MS) {
-                    subSplitPoints.push(i + 1); // After comma
-                }
-            }
-        }
-
-        if (subSplitPoints.length === 0) {
-            finalSpans.push(span);
-            continue;
-        }
-
-        let subLastSplit = 0;
-        for (const subSplit of subSplitPoints) {
-            const subText = text.substring(subLastSplit, subSplit + 1).trim();
-            const subStartIdx = span.startIdx + subLastSplit;
-            const subEndIdx = span.startIdx + subSplit;
-
-            if (subText.length > 0) {
-                const subStartMs = charTimeline[subStartIdx]?.timeMs || 0;
-                const subEndMs = charTimeline[subEndIdx]?.timeMs || 0;
-                const subDuration = subEndMs - subStartMs;
-
-                if (subDuration >= MIN_SEGMENT_DURATION_MS || finalSpans.length === 0) {
-                    finalSpans.push({
-                        startIdx: subStartIdx,
-                        endIdx: subEndIdx,
-                        text: subText,
-                        startMs: subStartMs,
-                        endMs: subEndMs,
-                    });
-                    subLastSplit = subSplit + 1;
-                }
-            }
-        }
-
-        if (subLastSplit < text.length) {
-            const remainText = text.substring(subLastSplit).trim();
-            if (remainText.length > 0) {
-                const subStartIdx = span.startIdx + subLastSplit;
-                const remainStartMs = charTimeline[subStartIdx]?.timeMs || 0;
-                const remainEndMs = span.endMs;
-                const remainDuration = remainEndMs - remainStartMs;
-
-                if (remainDuration < MIN_SEGMENT_DURATION_MS && finalSpans.length > 0) {
-                    const prev = finalSpans[finalSpans.length - 1];
-                    prev.text = prev.text + ' ' + remainText;
-                    prev.endMs = remainEndMs;
-                    prev.endIdx = span.endIdx;
-                } else {
-                    finalSpans.push({
-                        startIdx: subStartIdx,
-                        endIdx: span.endIdx,
-                        text: remainText,
-                        startMs: remainStartMs,
-                        endMs: remainEndMs,
-                    });
-                }
-            }
-        }
-    }
-
-    const mergedSpans: TextSpan[] = [];
-    for (const span of finalSpans) {
-        const duration = span.endMs - span.startMs;
-        if (duration < MIN_SEGMENT_DURATION_MS && mergedSpans.length > 0) {
-            const prev = mergedSpans[mergedSpans.length - 1];
-            prev.text = prev.text + ' ' + span.text;
-            prev.endMs = span.endMs;
-            prev.endIdx = span.endIdx;
-        } else {
-            mergedSpans.push({ ...span });
-        }
-    }
-
-    const outputLines: string[] = [];
-    for (let i = 0; i < mergedSpans.length; i++) {
-        const span = mergedSpans[i];
-        outputLines.push(`${i + 1}`);
-        outputLines.push(`${msToTime(span.startMs)} --> ${msToTime(span.endMs)}`);
-        outputLines.push(span.text);
-        outputLines.push('');
-    }
-
-    return outputLines.join('\r\n');
-};
-
-/**
- * Optimize an SRT file in place
- */
-export const optimizeSrtFile = (srtPath: string): string => {
-    const content = fs.readFileSync(srtPath, 'utf-8');
-    const optimized = optimizeSrt(content);
-    fs.writeFileSync(srtPath, optimized, 'utf-8');
-    return optimized;
-};
-
-export interface SrtEntry {
-    index: number;
-    startTime: string;
-    endTime: string;
-    text: string;
-}
-
 export const parseSrt = (content: string): SrtEntry[] => {
     const normalized = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     const entries: SrtEntry[] = [];
@@ -321,14 +85,14 @@ export const parseSrt = (content: string): SrtEntry[] => {
             const index = parseInt(indexLine, 10);
             if (isNaN(index)) continue;
 
-            const timeMatch = timeLine.match(/(\d{2}:\d{2}:\d{2},\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2},\d{3})/);
+            const timeMatch = timeLine.match(/(\d{2}:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,.]\d{3})/);
 
             if (timeMatch) {
                 const text = lines.slice(2).join('\n').trim();
                 entries.push({
                     index,
-                    startTime: timeMatch[1],
-                    endTime: timeMatch[2],
+                    startTime: timeMatch[1].replace('.', ','),
+                    endTime: timeMatch[2].replace('.', ','),
                     text,
                 });
             }
@@ -342,6 +106,258 @@ export const stringifySrt = (entries: SrtEntry[]): string => {
     return entries.map(entry => {
         return `${entry.index}\n${entry.startTime} --> ${entry.endTime}\n${entry.text}\n`;
     }).join('\n');
+};
+
+/**
+ * Optimize SRT segments
+ * 
+ * Strategy:
+ * 0. Filter out single isolated words
+ * 1. Merge small segments into a continuous stream with boundary checking
+ * 1.5. Split exceptionally long segments
+ * 2. Magnet logic for leftover isolated exclamations
+ * 3. Expansion logic to prevent chipmunk voice
+ */
+export const optimizeSrt = (srtContent: string): string => {
+    const originalSegments = parseSrt(srtContent);
+    if (originalSegments.length === 0) return srtContent;
+
+    // Pass 0: Remove isolated single-word segments (including interjections)
+    const filteredSegments = originalSegments.filter(seg => {
+        const cleanText = seg.text.replace(/[.,!?…—\-]/g, '').trim();
+        if (!cleanText) return false;
+        
+        const words = cleanText.split(/\s+/);
+        if (words.length <= 1) {
+            return false;
+        }
+        return true;
+    });
+
+    if (filteredSegments.length === 0) return "";
+
+    const mergedSegments: SrtEntry[] = [];
+    let currentMerge: SrtEntry | null = null;
+    
+    // Maximum safe duration for a single subtitle on screen (7 seconds)
+    const MAX_DURATION_MS = 7000;
+    // Maximum gap between words to be considered the same stream
+    const MAX_GAP_MS = 800;
+
+    for (const seg of filteredSegments) {
+        let text = seg.text.replace(/\s+/g, ' ').trim();
+        if (!text) continue;
+
+        if (!currentMerge) {
+            currentMerge = { ...seg, text };
+            continue;
+        }
+
+        const prevEndMs = timeToMs(currentMerge.endTime);
+        const currStartMs = timeToMs(seg.startTime);
+        const gap = currStartMs - prevEndMs;
+        
+        const combinedDuration = timeToMs(seg.endTime) - timeToMs(currentMerge.startTime);
+        const prevText = currentMerge.text.trim();
+        
+        let shouldMerge = true;
+
+        // 1. Force split if there's a long silence between segments
+        if (gap > MAX_GAP_MS) {
+            shouldMerge = false;
+        }
+        
+        // 2. Force split if the previous segment ends with a sentence end
+        if (shouldMerge) {
+            const combinedText = prevText + ' ' + text;
+            if (isSentenceEnd(combinedText, prevText.length - 1)) {
+                shouldMerge = false;
+            }
+        }
+        
+        // 3. Force split if combined duration is too long
+        if (shouldMerge && combinedDuration > MAX_DURATION_MS) {
+            shouldMerge = false;
+        }
+
+        // 4. Force split if combined text is getting too long (e.g. > 90 chars)
+        if (shouldMerge && (prevText.length + text.length > 90)) {
+            shouldMerge = false;
+        }
+
+        if (shouldMerge) {
+            // Append text and extend endTime
+            currentMerge.text = currentMerge.text + ' ' + text;
+            currentMerge.endTime = seg.endTime;
+        } else {
+            // Push current and start a new merge block
+            mergedSegments.push(currentMerge);
+            currentMerge = { ...seg, text };
+        }
+    }
+
+    if (currentMerge) {
+        mergedSegments.push(currentMerge);
+    }
+
+    // Pass 1.5: Split segments that are still exceptionally long
+    const splitSegments: SrtEntry[] = [];
+    const MAX_SEGMENT_DURATION_MS_SPLIT = 10000; // >= 10s is too long typically
+
+    for (const seg of mergedSegments) {
+        const startMs = timeToMs(seg.startTime);
+        const endMs = timeToMs(seg.endTime);
+        const duration = endMs - startMs;
+        
+        if (duration > MAX_SEGMENT_DURATION_MS_SPLIT && seg.text.length > 50) {
+            let text = seg.text;
+            let bestSplitIdx = -1;
+            const mid = Math.floor(text.length / 2);
+            let searchRadius = Math.floor(text.length / 3);
+            
+            // Search for punctuation / conjunctions near the middle
+            const regex = /,[\s\n]+|[\s\n]+(và|nhưng|hoặc|mà|nên|vì|do)[\s\n]+/gi;
+            let match;
+            let closestDist = Infinity;
+            
+            while ((match = regex.exec(text)) !== null) {
+                const matchIdx = match.index + (match[0].includes(',') ? 1 : 0);
+                const dist = Math.abs(matchIdx - mid);
+                if (dist <= searchRadius && dist < closestDist) {
+                    closestDist = dist;
+                    bestSplitIdx = matchIdx;
+                }
+            }
+            
+            if (bestSplitIdx === -1) {
+                const spaceRegex = /[\s\n]+/g;
+                while ((match = spaceRegex.exec(text)) !== null) {
+                    const dist = Math.abs(match.index - mid);
+                    if (dist <= searchRadius && dist < closestDist) {
+                        closestDist = dist;
+                        bestSplitIdx = match.index;
+                    }
+                }
+            }
+            
+            if (bestSplitIdx > 0 && bestSplitIdx < text.length) {
+                const part1 = text.substring(0, bestSplitIdx).trim();
+                const part2 = text.substring(bestSplitIdx).trim();
+                
+                const splitTimeMs = interpolateTime(startMs, endMs, bestSplitIdx, text.length);
+                
+                splitSegments.push({
+                    ...seg,
+                    endTime: msToTime(splitTimeMs),
+                    text: part1
+                });
+                splitSegments.push({
+                    index: 0,
+                    startTime: msToTime(splitTimeMs + 1),
+                    endTime: seg.endTime,
+                    text: part2
+                });
+            } else {
+                splitSegments.push(seg);
+            }
+        } else {
+            splitSegments.push(seg);
+        }
+    }
+
+    // Pass 2: Magnet Logic (for leftover short isolated parts like "Oh!", "Vâng")
+    const magnetSegments: SrtEntry[] = [];
+    let i = 0;
+    while (i < splitSegments.length) {
+        let curr = { ...splitSegments[i] };
+        let shouldPush = true;
+        
+        if (curr.text.trim().length <= 6) {
+            let prev = magnetSegments.length > 0 ? magnetSegments[magnetSegments.length - 1] : null;
+            let next = i + 1 < splitSegments.length ? { ...splitSegments[i + 1] } : null;
+            
+            let gapPrev = prev ? timeToMs(curr.startTime) - timeToMs(prev.endTime) : Infinity;
+            let gapNext = next ? timeToMs(next.startTime) - timeToMs(curr.endTime) : Infinity;
+            
+            if (gapPrev <= 500 || gapNext <= 500) {
+                if (gapPrev <= gapNext && prev) {
+                    prev.text = prev.text + ' ' + curr.text;
+                    prev.endTime = curr.endTime;
+                    shouldPush = false;
+                } else if (next) {
+                    next.text = curr.text + ' ' + next.text;
+                    next.startTime = curr.startTime;
+                    splitSegments[i + 1] = next; // Update the array so the next iteration gets it
+                    shouldPush = false;
+                }
+            }
+        }
+        
+        if (shouldPush) {
+            magnetSegments.push({ ...curr });
+        }
+        i++;
+    }
+
+    // Pass 3: Expansion logic (Padding duration) 
+    // To prevent TTS from chunking out chipmunk-like voice clips
+    const finalSegments: SrtEntry[] = [];
+    for (let j = 0; j < magnetSegments.length; j++) {
+        let curr = { ...magnetSegments[j] };
+        
+        let currStartMs = timeToMs(curr.startTime);
+        let currEndMs = timeToMs(curr.endTime);
+        let duration = currEndMs - currStartMs;
+        
+        if (duration < 1000) {
+            let needed = 1000 - duration;
+            
+            let prev = j > 0 ? finalSegments[finalSegments.length - 1] : null;
+            let maxExpandBack = prev ? (currStartMs - timeToMs(prev.endTime) - 10) : Infinity;
+            if (maxExpandBack < 0) maxExpandBack = 0;
+            
+            let expandBackBy = Math.min(Math.floor(needed / 2), maxExpandBack);
+            needed -= expandBackBy;
+            currStartMs -= expandBackBy;
+            
+            let next = j + 1 < magnetSegments.length ? magnetSegments[j + 1] : null;
+            let maxExpandForward = next ? (timeToMs(next.startTime) - currEndMs - 10) : Infinity;
+            if (maxExpandForward < 0) maxExpandForward = 0;
+            
+            let expandForwardBy = Math.min(needed, maxExpandForward);
+            needed -= expandForwardBy;
+            currEndMs += expandForwardBy;
+            
+            // Try to compensate with backwards if forward didn't yield enough
+            if (needed > 0 && expandBackBy < maxExpandBack) {
+                let remainingMaxBack = maxExpandBack - expandBackBy;
+                let extraBackBy = Math.min(needed, remainingMaxBack);
+                currStartMs -= extraBackBy;
+            }
+            
+            curr.startTime = msToTime(currStartMs);
+            curr.endTime = msToTime(currEndMs);
+        }
+        
+        // Re-index before pushing
+        curr.index = j + 1;
+        finalSegments.push(curr);
+    }
+
+    return finalSegments.map((seg, idx) => {
+        // Re-index explicitly to be safe
+        return `${idx + 1}\r\n${seg.startTime} --> ${seg.endTime}\r\n${seg.text}\r\n`;
+    }).join('\r\n');
+};
+
+/**
+ * Optimize an SRT file in place
+ */
+export const optimizeSrtFile = (srtPath: string): string => {
+    const content = fs.readFileSync(srtPath, 'utf-8');
+    const optimized = optimizeSrt(content);
+    fs.writeFileSync(srtPath, optimized, 'utf-8');
+    return optimized;
 };
 
 export const timeToSeconds = (time: string): number => {
@@ -361,4 +377,3 @@ export const timeToSeconds = (time: string): number => {
 
     return seconds + milliseconds;
 };
-

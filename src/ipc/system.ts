@@ -1,7 +1,7 @@
 import { ipcMain, shell } from "electron";
 import fs from "fs";
 import path from "path";
-import { getApiKey, setApiKey, getPrompts, savePrompts, getActivePromptId, setActivePromptId } from "../services/ConfigService";
+import { getApiKey, setApiKey, getPrompts, savePrompts, getActivePromptId, setActivePromptId, getDefaultBackgroundVolume, setDefaultBackgroundVolume, getDefaultFadeDuration, setDefaultFadeDuration } from "../services/ConfigService";
 
 export const setupSystemIpc = () => {
     ipcMain.handle("get-api-key", (_event, provider: string) => {
@@ -84,5 +84,21 @@ export const setupSystemIpc = () => {
 
     ipcMain.handle("set-active-prompt-id", (_event, id: string) => {
         return setActivePromptId(id);
+    });
+
+    ipcMain.handle("get-default-background-volume", () => {
+        return getDefaultBackgroundVolume();
+    });
+
+    ipcMain.handle("set-default-background-volume", (_event, volume: number) => {
+        return setDefaultBackgroundVolume(volume);
+    });
+
+    ipcMain.handle("get-default-fade-duration", () => {
+        return getDefaultFadeDuration();
+    });
+
+    ipcMain.handle("set-default-fade-duration", (_event, duration: number) => {
+        return setDefaultFadeDuration(duration);
     });
 };

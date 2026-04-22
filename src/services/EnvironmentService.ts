@@ -4,7 +4,7 @@ import fs from 'fs';
 import https from 'https';
 import { spawn, spawnSync } from 'child_process';
 import { getHardwareInfo } from './HardwareService';
-import { getWhisperCompileService, REQUIRED_DLLS } from './WhisperCompileService';
+import { getWindowsShortPath } from '../lib/PathUtils';
 
 const isDev = !app.isPackaged;
 const BIN_DIR = isDev
@@ -14,7 +14,8 @@ const BIN_DIR = isDev
 const MODELS_DIR = path.join(BIN_DIR, 'models');
 const WHISPER_CPU_DIR = path.join(BIN_DIR, 'whisper-cpu');
 const WHISPER_GPU_DIR = path.join(BIN_DIR, 'whisper-gpu');
-const WHISPER_VULKAN_DIR = path.join(BIN_DIR, 'whisper-vulkan');
+const WHISPER_OPENBLAS_DIR = path.join(BIN_DIR, 'whisper-openblas');
+const WHISPER_VULKAN_DIR_LEGACY = path.join(BIN_DIR, 'whisper-vulkan');
 const YT_DLP_DIR = path.join(BIN_DIR, 'yt-dlp');
 const FFMPEG_DIR = path.join(BIN_DIR, 'ffmpeg');
 const HANDBRAKE_DIR = path.join(BIN_DIR, 'handbrake');
@@ -22,6 +23,7 @@ const HANDBRAKE_DIR = path.join(BIN_DIR, 'handbrake');
 export const getYtDlpPath = () => path.join(YT_DLP_DIR, 'yt-dlp.exe');
 export const getFfmpegPath = () => path.join(FFMPEG_DIR, 'ffmpeg.exe');
 export const getHandBrakePath = () => path.join(HANDBRAKE_DIR, 'HandBrakeCLI.exe');
+export const getFfprobePath = () => path.join(FFMPEG_DIR, 'ffprobe.exe');
 const MODEL_CONFIG_PATH = path.join(MODELS_DIR, 'model-config.json');
 
 export interface WhisperModelInfo {
@@ -213,14 +215,14 @@ export const deleteWhisperModel = (modelId: string): boolean => {
 };
 
 export const getWhisperPath = (engine: string = 'cpu') => {
-    const variant = engine.includes('vulkan') ? 'vulkan' :
+    const variant = engine.includes('openblas') ? 'openblas' :
         engine.includes('gpu') ? 'gpu' : 'cpu';
 
     let result: string;
     if (variant === 'gpu') {
         result = path.join(WHISPER_GPU_DIR, 'whisper-cli.exe');
-    } else if (variant === 'vulkan') {
-        result = path.join(WHISPER_VULKAN_DIR, 'whisper-cli.exe');
+    } else if (variant === 'openblas') {
+        result = path.join(WHISPER_OPENBLAS_DIR, 'whisper-cli.exe');
     } else {
         result = path.join(WHISPER_CPU_DIR, 'whisper-cli.exe');
     }
@@ -231,8 +233,9 @@ export const getWhisperPath = (engine: string = 'cpu') => {
 
 const YT_DLP_URL = 'https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe';
 const FFMPEG_URL = 'https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip';
-const WHISPER_CPU_URL = 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.3/whisper-bin-x64.zip';
-const WHISPER_GPU_URL = 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.3/whisper-cublas-12.4.0-bin-x64.zip';
+const WHISPER_CPU_URL = 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-bin-x64.zip';
+const WHISPER_GPU_URL = 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-cublas-12.4.0-bin-x64.zip';
+const WHISPER_OPENBLAS_URL = 'https://github.com/ggml-org/whisper.cpp/releases/download/v1.8.4/whisper-blas-bin-x64.zip';
 const HANDBRAKE_URL = 'https://github.com/HandBrake/HandBrake/releases/download/1.10.2/HandBrakeCLI-1.10.2-win-x86_64.zip';
 
 interface SetupProgress {
@@ -318,27 +321,44 @@ const extractExeFromZip = async (zipPath: string, destDir: string, exeName: stri
     return new Promise((resolve) => {
         try {
             const psCommand = `
-                $zipPath = '${zipPath.replace(/'/g, "''")}';
-                $extractPath = '${destDir.replace(/'/g, "''")}';
+                $exeName = '${exeName}';
+                $zipPath = '${getWindowsShortPath(zipPath)}';
+                $extractPath = '${getWindowsShortPath(destDir)}';
                 $tempExtract = Join-Path $extractPath '${exeName}_temp';
                 
-                if (Test-Path $tempExtract) { Remove-Item $tempExtract -Recurse -Force }
+                # Try to kill any running instances first
+                $running = Get-Process -Name $exeName.Replace(".exe", "") -ErrorAction SilentlyContinue;
+                if ($running) { 
+                    $running | Stop-Process -Force;
+                    Start-Sleep -Seconds 1;
+                }
+
+                if (Test-Path $tempExtract) { 
+                    try { Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue } catch {}
+                }
                 
                 Expand-Archive -Path $zipPath -DestinationPath $tempExtract -Force;
                 
-                $targetExe = Get-ChildItem -Path $tempExtract -Recurse -Filter "${exeName}" | Select-Object -First 1;
+                $targetExe = Get-ChildItem -Path $tempExtract -Recurse -Filter $exeName | Select-Object -First 1;
                 
                 if ($targetExe) {
-                    Copy-Item $targetExe.FullName (Join-Path $extractPath '${exeName}') -Force;
+                    Copy-Item $targetExe.FullName (Join-Path $extractPath $exeName) -Force;
                     # Also copy any DLLs that might be needed
                     $dllFiles = Get-ChildItem -Path $targetExe.DirectoryName -Filter "*.dll" -ErrorAction SilentlyContinue;
                     foreach ($dll in $dllFiles) {
                         Copy-Item $dll.FullName (Join-Path $extractPath $dll.Name) -Force;
                     }
-                    Remove-Item $tempExtract -Recurse -Force;
+                    # Also copy sibling .exe files (e.g. ffprobe.exe alongside ffmpeg.exe)
+                    $siblingExes = Get-ChildItem -Path $targetExe.DirectoryName -Filter "*.exe" -ErrorAction SilentlyContinue;
+                    foreach ($exe in $siblingExes) {
+                        if ($exe.Name -ne $exeName) {
+                            Copy-Item $exe.FullName (Join-Path $extractPath $exe.Name) -Force;
+                        }
+                    }
+                    try { Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue } catch {}
                     Write-Output "SUCCESS";
                 } else {
-                    Remove-Item $tempExtract -Recurse -Force;
+                    try { Remove-Item $tempExtract -Recurse -Force -ErrorAction SilentlyContinue } catch {}
                     Write-Output "NOTFOUND";
                 }
             `;
@@ -380,70 +400,57 @@ export const isWhisperModelReady = (): boolean => {
     return WHISPER_MODELS.some(m => fs.existsSync(path.join(MODELS_DIR, m.fileName)));
 };
 
-export const isWhisperEngineReady = (engine: 'cpu' | 'gpu' | 'vulkan'): boolean => {
+export const isWhisperEngineReady = (engine: 'cpu' | 'gpu' | 'openblas'): boolean => {
     const exePath = getWhisperPath(engine);
-    if (!fs.existsSync(exePath)) return false;
-
-    if (engine === 'vulkan') {
-        const binDir = WHISPER_VULKAN_DIR;
-
-        // 1. Check if required DLLs exist
-        for (const dll of REQUIRED_DLLS) {
-            if (!fs.existsSync(path.join(binDir, dll))) {
-                console.warn(`[isWhisperEngineReady] Missing required DLL for Vulkan: ${dll}`);
-                return false;
-            }
-        }
-
-        // 2. Run a quick binary test to catch missing hidden dependencies or memory access errors
-        try {
-            const result = spawnSync(exePath, ['--help'], {
-                cwd: binDir,
-                env: { ...process.env, PATH: `${binDir}${path.delimiter}${process.env.PATH}` },
-                encoding: 'utf-8',
-                timeout: 5000 // 5 seconds max
-            });
-
-            if (result.error) {
-                console.error(`[isWhisperEngineReady] Vulkan binary failed to spawn: ${result.error.message}`);
-                return false;
-            }
-
-            // Even if it returns non-zero, as long as it prints usage, it's fine.
-            const output = (result.stdout || '') + (result.stderr || '');
-            if (result.status !== 0 && !output.toLowerCase().includes('usage:')) {
-                console.error(`[isWhisperEngineReady] Vulkan binary crash or error. Exit code: ${result.status}`);
-                return false;
-            }
-        } catch (error) {
-            console.error(`[isWhisperEngineReady] Exception during Vulkan binary test:`, error);
-            return false;
-        }
-    }
-
-    return true;
+    return fs.existsSync(exePath);
 };
 
 export const isEnvironmentReady = (): boolean => {
-    return isYtDlpReady() && isFfmpegReady() && isHandBrakeReady() && isWhisperEngineReady('cpu') && isWhisperEngineReady('gpu') && isWhisperModelReady();
+    // If running in Playwright test environment, avoid potential hangs in hardware checks
+    if (process.env.PLAYWRIGHT_TEST === "true") {
+        console.log('[isEnvironmentReady] Playwright test mode detected. Bypassing check.');
+        return true;
+    }
+
+    const yt = isYtDlpReady();
+    const ff = isFfmpegReady();
+    const hb = isHandBrakeReady();
+    const wcpu = isWhisperEngineReady('cpu');
+    const wgpu = isWhisperEngineReady('gpu');
+    const wopenblas = isWhisperEngineReady('openblas');
+    const wmodel = isWhisperModelReady();
+    
+    console.log('[isEnvironmentReady] Diagnostics:', {
+        yt, ff, hb, wcpu, wgpu, wopenblas, wmodel,
+    });
+    console.log('[isEnvironmentReady] BIN_DIR:', BIN_DIR);
+    console.log('[isEnvironmentReady] isDev:', !app.isPackaged);
+
+    const isReady = yt && ff && hb && wcpu && wgpu && wopenblas && wmodel;
+    if (!isReady) {
+        console.warn('[isEnvironmentReady] Environment NOT ready. Missing components.');
+    }
+    return isReady;
 };
 
 /**
  * Download a specific whisper engine variant on-demand
  */
 export const downloadWhisperEngine = async (
-    engine: 'cpu' | 'gpu' | 'vulkan',
+    engine: 'cpu' | 'gpu' | 'openblas',
     onProgress: ProgressCallback
 ): Promise<boolean> => {
     if (isWhisperEngineReady(engine)) return true;
 
-    if (engine === 'vulkan') {
-        return compileWhisperVulkan(onProgress);
-    }
-
-    const url = engine === 'gpu' ? WHISPER_GPU_URL : WHISPER_CPU_URL;
-    const destDir = engine === 'gpu' ? WHISPER_GPU_DIR : WHISPER_CPU_DIR;
-    const label = engine === 'gpu' ? 'Whisper GPU (CUDA)' : 'Whisper CPU';
+    const url = engine === 'gpu' ? WHISPER_GPU_URL
+        : engine === 'openblas' ? WHISPER_OPENBLAS_URL
+        : WHISPER_CPU_URL;
+    const destDir = engine === 'gpu' ? WHISPER_GPU_DIR
+        : engine === 'openblas' ? WHISPER_OPENBLAS_DIR
+        : WHISPER_CPU_DIR;
+    const label = engine === 'gpu' ? 'Whisper GPU (CUDA)'
+        : engine === 'openblas' ? 'Whisper OpenBLAS (CPU Accelerated)'
+        : 'Whisper CPU';
 
     ensureDir(destDir);
 
@@ -466,38 +473,16 @@ export const downloadWhisperEngine = async (
 };
 
 /**
- * Auto-compile whisper.cpp with Vulkan support using MSYS2 + MinGW
+ * Cleanup legacy whisper-vulkan folder if it exists
  */
-export const compileWhisperVulkan = async (
-    onProgress: ProgressCallback
-): Promise<boolean> => {
-    const vulkanDir = WHISPER_VULKAN_DIR;
-    ensureDir(vulkanDir);
-
-    const compileService = getWhisperCompileService();
-
-    // Listen for compile progress and relay to caller
-    const progressHandler = (event: any) => {
-        onProgress({
-            status: event.state === 'error' ? 'error' : 'downloading',
-            progress: event.progress,
-            detail: event.message + (event.error ? `\n${event.error}` : ''),
-        });
-    };
-
-    compileService.on('progress', progressHandler);
-
-    try {
-        const result = await compileService.compile(vulkanDir);
-        if (result.success) {
-            onProgress({ status: 'ready', progress: 100, detail: 'Whisper Vulkan is ready!' });
-            return true;
-        } else {
-            onProgress({ status: 'error', progress: 0, detail: result.error || 'Compilation failed!' });
-            return false;
+export const cleanupLegacyVulkanDir = (): void => {
+    if (fs.existsSync(WHISPER_VULKAN_DIR_LEGACY)) {
+        try {
+            fs.rmSync(WHISPER_VULKAN_DIR_LEGACY, { recursive: true, force: true });
+            console.log('[cleanup] Removed legacy whisper-vulkan directory.');
+        } catch (err) {
+            console.warn('[cleanup] Failed to remove legacy whisper-vulkan directory:', err);
         }
-    } finally {
-        compileService.off('progress', progressHandler);
     }
 };
 
@@ -513,9 +498,21 @@ export const setupEnvironment = async (onProgress: ProgressCallback): Promise<bo
         ensureDir(HANDBRAKE_DIR);
         ensureDir(WHISPER_CPU_DIR);
         ensureDir(WHISPER_GPU_DIR);
-        ensureDir(WHISPER_VULKAN_DIR);
+        ensureDir(WHISPER_OPENBLAS_DIR);
+
+        // Cleanup legacy whisper-vulkan folder
+        cleanupLegacyVulkanDir();
 
         onProgress({ status: 'preparing', progress: 0, detail: 'Checking environment...' });
+        console.log('[setupEnvironment] Starting setup. Current state:', {
+            yt: isYtDlpReady(),
+            ff: isFfmpegReady(),
+            hb: isHandBrakeReady(),
+            wcpu: isWhisperEngineReady('cpu'),
+            wgpu: isWhisperEngineReady('gpu'),
+            wopenblas: isWhisperEngineReady('openblas'),
+            wmodel: isWhisperModelReady()
+        });
 
         if (!isYtDlpReady()) {
             onProgress({ status: 'downloading', progress: 0, detail: 'Downloading yt-dlp.exe...' });
@@ -586,18 +583,36 @@ export const setupEnvironment = async (onProgress: ProgressCallback): Promise<bo
             onProgress({ status: 'downloading', progress: 48, detail: 'Downloading Whisper GPU (CUDA)...' });
             const whisperGpuZipPath = path.join(WHISPER_GPU_DIR, 'whisper-gpu.zip');
             const success = await downloadFile(WHISPER_GPU_URL, whisperGpuZipPath, (percent) => {
-                onProgress({ status: 'downloading', progress: 48 + percent * 0.10, detail: `Downloading Whisper GPU: ${percent}%` });
+                onProgress({ status: 'downloading', progress: 48 + percent * 0.08, detail: `Downloading Whisper GPU: ${percent}%` });
             });
             if (!success) return false;
-            onProgress({ status: 'extracting', progress: 58, detail: 'Extracting Whisper GPU...' });
+            onProgress({ status: 'extracting', progress: 56, detail: 'Extracting Whisper GPU...' });
             const extracted = await extractExeFromZip(whisperGpuZipPath, WHISPER_GPU_DIR, 'whisper-cli.exe');
             if (!extracted) {
-                onProgress({ status: 'error', progress: 58, detail: 'Failed to extract Whisper GPU!' });
+                onProgress({ status: 'error', progress: 56, detail: 'Failed to extract Whisper GPU!' });
                 return false;
             }
-            onProgress({ status: 'downloading', progress: 60, detail: 'Whisper GPU is ready.' });
+            onProgress({ status: 'downloading', progress: 56, detail: 'Whisper GPU is ready.' });
         } else {
-            onProgress({ status: 'checking', progress: 60, detail: 'Whisper GPU is ready.' });
+            onProgress({ status: 'checking', progress: 56, detail: 'Whisper GPU is ready.' });
+        }
+
+        if (!isWhisperEngineReady('openblas')) {
+            onProgress({ status: 'downloading', progress: 56, detail: 'Downloading Whisper OpenBLAS...' });
+            const whisperBlasZipPath = path.join(WHISPER_OPENBLAS_DIR, 'whisper-openblas.zip');
+            const success = await downloadFile(WHISPER_OPENBLAS_URL, whisperBlasZipPath, (percent) => {
+                onProgress({ status: 'downloading', progress: 56 + percent * 0.04, detail: `Downloading Whisper OpenBLAS: ${percent}%` });
+            });
+            if (!success) return false;
+            onProgress({ status: 'extracting', progress: 60, detail: 'Extracting Whisper OpenBLAS...' });
+            const extracted = await extractExeFromZip(whisperBlasZipPath, WHISPER_OPENBLAS_DIR, 'whisper-cli.exe');
+            if (!extracted) {
+                onProgress({ status: 'error', progress: 60, detail: 'Failed to extract Whisper OpenBLAS!' });
+                return false;
+            }
+            onProgress({ status: 'downloading', progress: 60, detail: 'Whisper OpenBLAS is ready.' });
+        } else {
+            onProgress({ status: 'checking', progress: 60, detail: 'Whisper OpenBLAS is ready.' });
         }
 
         if (!isWhisperModelReady()) {

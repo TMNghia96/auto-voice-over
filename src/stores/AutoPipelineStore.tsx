@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, ReactNode } from "react";
+import { createContext, useContext, useState, ReactNode, useMemo, useCallback } from "react";
 
 export type AutoPhase = "config" | "input" | "transcript" | "translate" | "audio" | "final" | "done";
 
@@ -32,25 +32,27 @@ export const AutoPipelineProvider = ({ children }: { children: ReactNode }) => {
     const [currentPhase, setCurrentPhase] = useState<AutoPhase>("config");
     const [completedPhases, setCompletedPhases] = useState<Set<AutoPhase>>(new Set());
 
-    const markPhaseCompleted = (phase: AutoPhase) => {
+    const markPhaseCompleted = useCallback((phase: AutoPhase) => {
         setCompletedPhases(prev => {
             const next = new Set(prev);
             next.add(phase);
             return next;
         });
-    };
+    }, []);
 
-    const resetPipeline = () => {
+    const resetPipeline = useCallback(() => {
         setCurrentPhase("config");
         setCompletedPhases(new Set());
-    };
+    }, []);
+
+    const value = useMemo(() => ({
+        currentPhase, setCurrentPhase,
+        completedPhases, markPhaseCompleted,
+        resetPipeline,
+    }), [currentPhase, completedPhases, markPhaseCompleted, resetPipeline]);
 
     return (
-        <AutoPipelineContext.Provider value={{
-            currentPhase, setCurrentPhase,
-            completedPhases, markPhaseCompleted,
-            resetPipeline,
-        }}>
+        <AutoPipelineContext.Provider value={value}>
             {children}
         </AutoPipelineContext.Provider>
     );

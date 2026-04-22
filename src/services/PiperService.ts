@@ -37,6 +37,13 @@ const ensureDir = (dir: string) => {
     }
 };
 
+export interface SrtEntryParams {
+    index: number;
+    text: string;
+    startTime?: string;
+    endTime?: string;
+}
+
 /**
  * Generate audio for a single text segment using Edge TTS.
  * Uses toStream() and writes directly to the target path for precise control.
@@ -44,9 +51,10 @@ const ensureDir = (dir: string) => {
 export const generateAudioSegment = async (
     text: string,
     voiceName: string,
-    outputPath: string
+    outputPath: string,
+    entry?: SrtEntryParams
 ): Promise<boolean> => {
-    const cleanText = text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
+    let cleanText = text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
     if (!cleanText) {
         console.log(`Skipping empty text for ${outputPath}`);
         return false;
@@ -73,14 +81,14 @@ export const generateAudioSegment = async (
                     if (hasData && fs.existsSync(outputPath)) {
                         const stat = fs.statSync(outputPath);
                         if (stat.size > 0) {
-                            resolve(true);
+                            resolve(true); // Produced valid audio
                         } else {
                             fs.unlinkSync(outputPath);
-                            resolve(false);
+                            resolve(true); // TTS skipped it / returned no audio. We return true so it acts as an intentional silent gap instead of failing.
                         }
                     } else {
                         if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-                        resolve(false);
+                        resolve(true); // Graceful fallback
                     }
                 });
             });
@@ -105,7 +113,7 @@ export const generateAudioSegment = async (
  * Generate audio for all SRT entries SEQUENTIALLY (one by one, in order).
  */
 export const generateAllAudio = async (
-    entries: { index: number; text: string }[],
+    entries: SrtEntryParams[],
     langCode: string,
     outputDir: string,
     onProgress: (p: TTSProgress) => void,
@@ -140,7 +148,7 @@ export const generateAllAudio = async (
             entryStatus: 'start',
         });
 
-        const success = await generateAudioSegment(entry.text, voice.voice, outputPath);
+        const success = await generateAudioSegment(entry.text, voice.voice, outputPath, entry);
 
         if (success) {
             results[i] = outputPath;

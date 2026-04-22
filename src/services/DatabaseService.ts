@@ -36,13 +36,6 @@ export const connectDB = () => {
             )
         `);
 
-        try {
-            db.exec('ALTER TABLE projects ADD COLUMN pinned INTEGER DEFAULT 0');
-        } catch (error) {
-            // Ignore if the column already exists from a previous schema version.
-            console.debug('Skipping pinned column migration:', error);
-        }
-
         return db;
     } catch (error) {
         console.error('Failed to initialize database:', error);

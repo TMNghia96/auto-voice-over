@@ -1,10 +1,12 @@
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs';
-import { getWhisperPath, getWhisperModelPath, getFfmpegPath, isWhisperEngineReady, downloadWhisperEngine } from './EnvironmentService';
+import { getApiKey } from './ConfigService';
+import { getWhisperPath, getWhisperModelPath, getFfmpegPath, isWhisperEngineReady, downloadWhisperEngine, getActiveModelId } from './EnvironmentService';
 import { optimizeSrtFile } from '../lib/SrtOptimizer';
+import { getWindowsShortPath } from '../lib/PathUtils';
 
-export type TranscriptEngine = 'whisper-cpu' | 'whisper-gpu' | 'whisper-vulkan' | 'assemblyai';
+export type TranscriptEngine = 'whisper-cpu' | 'whisper-gpu' | 'whisper-openblas';
 
 interface TranscriptProgress {
     status: 'preparing' | 'converting' | 'transcribing' | 'downloading' | 'done' | 'error';
@@ -44,55 +46,69 @@ const convertToWav = (inputPath: string, outputPath: string, ffmpegPath: string)
     });
 };
 
-/**
- * Run whisper.cpp to transcribe audio and generate SRT
- */
-const runWhisper = (
+const runWhisperX = (
     wavPath: string,
     outputDir: string,
-    outputName: string,
     onProgress: ProgressCallback,
-    engine: 'cpu' | 'gpu' | 'vulkan' = 'cpu',
-    language = 'auto'
+    engine: 'cpu' | 'gpu' | 'openblas' = 'cpu',
+    language = 'auto',
+    hfToken: string | null = null
 ): Promise<string | null> => {
     return new Promise((resolve) => {
-        const whisperPath = getWhisperPath(engine);
-        const modelPath = getWhisperModelPath();
-
-        const outputBase = path.join(outputDir, outputName);
+        const modelId = getActiveModelId() || 'base';
 
         const args = [
-            '-m', modelPath,
-            '-f', wavPath,
-            '-osrt',                // Output SRT format
-            '-of', outputBase,      // Output file base name (whisper adds .srt)
-            '-l', language || 'auto',
-            '--print-progress',     // Print progress
+            '-m', 'whisperx', // Execute Python module directly
+            getWindowsShortPath(wavPath),
+            '--model', modelId,
+            '--output_dir', getWindowsShortPath(outputDir),
+            '--output_format', 'srt',
+            '--compute_type', 'int8', // Standard optimization for VRAM
         ];
 
-        console.log('Running whisper:', whisperPath, args.join(' '));
+        if (language && language !== 'auto') {
+            args.push('--language', language);
+        }
 
-        const proc = spawn(whisperPath, args, {
-            cwd: path.dirname(whisperPath)
+        if (hfToken && hfToken.trim().length > 0) {
+            args.push('--hf_token', hfToken.trim());
+        }
+
+        // CPU vs GPU logic
+        const engineStr = String(engine).toLowerCase();
+        console.log(`[WhisperX Debug] Received engine variant: "${engineStr}"`);
+        
+        // Nếu chọn GPU nhưng máy là AMD (không có CUDA), người dùng nên chọn CPU.
+        // Ở đây ta ép 'cpu' nếu chuỗi chứa 'cpu' hoặc 'openblas'.
+        const device = (engineStr.includes('cpu') || engineStr.includes('openblas')) ? 'cpu' : 'cuda';
+        
+        args.push('--device', device);
+        
+        console.log(`[WhisperX Info] Selected device: ${device.toUpperCase()}`);
+        console.log('Running python with args:', args.join(' '));
+
+        const proc = spawn('python', args, {
+            shell: process.platform === 'win32', // Use shell to resolve global path better on Windows
         });
 
+        let stderrOutput = '';
         let lastProgress = 0;
 
-        let stderrOutput = '';
         proc.stderr.on('data', (data) => {
             const text = data.toString();
             stderrOutput += text;
-            console.log('[whisper stderr]', text);
+            console.log('[whisperx stderr]', text);
 
-            const progressMatch = text.match(/progress\s*=\s*(\d+)%/);
+            // whisperx outputs typical tqdm progress bar: 30%|███       | 3/10 [00:01<00:02, 2.50it/s]
+            const progressMatch = text.match(/(\d+)%/);
             if (progressMatch) {
                 const pct = parseInt(progressMatch[1], 10);
                 if (pct > lastProgress) {
                     lastProgress = pct;
                     onProgress({
                         status: 'transcribing',
-                        progress: 30 + pct * 0.7, // 30-100% range
-                        detail: `Transcribing voice... ${pct}%`
+                        progress: 30 + pct * 0.7, // map 0-100 to 30-100 overall
+                        detail: `Transcribing voice (WhisperX)... ${pct}%`
                     });
                 }
             }
@@ -100,57 +116,62 @@ const runWhisper = (
 
         proc.stdout.on('data', (data) => {
             const text = data.toString();
-            console.log('[whisper stdout]', text);
-
-            const progressMatch = text.match(/progress\s*=\s*(\d+)%/);
-            if (progressMatch) {
-                const pct = parseInt(progressMatch[1], 10);
-                if (pct > lastProgress) {
-                    lastProgress = pct;
-                    onProgress({
-                        status: 'transcribing',
-                        progress: 30 + pct * 0.7,
-                        detail: `Transcribing voice... ${pct}%`
-                    });
-                }
-            }
+            console.log('[whisperx stdout]', text);
         });
 
         proc.on('close', (code) => {
-            console.log('Whisper finished, exit code:', code);
-            const srtPath = outputBase + '.srt';
-            if (code === 0 && fs.existsSync(srtPath)) {
-                resolve(srtPath);
-            } else {
-                if (code === 3221225781) {
-                    onProgress({
-                        status: 'error',
-                        progress: 0,
-                        detail: 'Whisper failed with a memory access error (0xC0000005).\n\n' +
-                            'This is likely due to missing MinGW DLLs or incompatible GPU drivers. Please try:\n' +
-                            '1. Updating your AMD Graphics Drivers to the latest version.\n' +
-                            '2. Switching to a smaller model (e.g., "base" or "small") in the Models tab.\n' +
-                            '3. Clicking "Re-install" in the Recognition tab to re-verify the engine binaries.\n' +
-                            '4. If you have an NVIDIA GPU, specifically select the "GPU (CUDA)" engine instead.'
-                    });
-                    resolve(null);
+            console.log('WhisperX finished, exit code:', code);
+            
+            // WhisperX outputs the file with the same name as the input audio + .srt
+            const baseName = path.basename(wavPath, path.extname(wavPath));
+            const srtPath = path.join(outputDir, baseName + '.srt');
+
+            // Handle potential Short Path filename (e.g. AUDIO_~1.srt)
+            const shortBaseName = path.basename(getWindowsShortPath(wavPath), path.extname(getWindowsShortPath(wavPath)));
+            const shortSrtPath = path.join(outputDir, shortBaseName + '.srt');
+
+            if (code === 0) {
+                let finalSrtPath = null;
+
+                if (fs.existsSync(srtPath)) {
+                    finalSrtPath = srtPath;
+                } else if (fs.existsSync(shortSrtPath)) {
+                    console.log(`[WhisperX Info] Found SRT with short name: ${shortBaseName}.srt. Renaming to ${baseName}.srt...`);
+                    try {
+                        fs.renameSync(shortSrtPath, srtPath);
+                        finalSrtPath = srtPath;
+                    } catch (err) {
+                        console.error('Failed to rename short path SRT:', err);
+                        finalSrtPath = shortSrtPath; // Fallback to use the short path one anyway
+                    }
+                }
+
+                if (finalSrtPath) {
+                    resolve(finalSrtPath);
                     return;
                 }
-
-                let errorMessage = `Whisper failed (Exit code: ${code}).`;
-                if (code === 1) {
-                    errorMessage = 'Parameter or model file error. Check if the model is downloaded.';
-                }
-
-                console.error('Whisper failed.', errorMessage, 'Stderr:', stderrOutput);
-                onProgress({ status: 'error', progress: 0, detail: errorMessage });
-                resolve(null);
             }
+
+            // If we reach here, it failed or the file is missing
+            let errorMessage = `WhisperX failed (Exit code: ${code}).`;
+            if (code === 0 && !fs.existsSync(srtPath)) {
+                errorMessage = `WhisperX finished but output file was not found! Expected: ${baseName}.srt`;
+            } else if (code === 1 || stderrOutput.includes('not recognized') || stderrOutput.includes('not found')) {
+                errorMessage = 'WhisperX is not installed. Please install Python and run: pip install whisperx';
+            } else if (stderrOutput.includes('Unauthorized') || stderrOutput.includes('token')) {
+                errorMessage = 'Hugging Face Token is invalid or missing permissions for pyannote/segmentation-3.0.';
+            } else if (stderrOutput.includes('CUDA out of memory') || stderrOutput.includes('OutOfMemory')) {
+                errorMessage = 'GPU Out of Memory. Try switching the Engine to CPU in settings.';
+            }
+
+            console.error('WhisperX failed.', errorMessage, 'Stderr:', stderrOutput);
+            onProgress({ status: 'error', progress: 0, detail: errorMessage });
+            resolve(null);
         });
 
         proc.on('error', (err) => {
-            console.error('Whisper spawn error:', err);
-            onProgress({ status: 'error', progress: 0, detail: `Could not start Whisper: ${err.message}` });
+            console.error('WhisperX spawn error:', err);
+            onProgress({ status: 'error', progress: 0, detail: `Could not start WhisperX. Make sure Python and WhisperX are installed via pip. Error: ${err.message}` });
             resolve(null);
         });
     });
@@ -190,34 +211,11 @@ export const transcribeAudio = async (
     language = 'auto'
 ): Promise<{ srtPath: string; srtContent: string } | null> => {
     try {
-        if (engine === 'assemblyai') {
-            onProgress({ status: 'error', progress: 0, detail: 'AssemblyAI chưa được hỗ trợ. Vui lòng chọn Whisper.' });
-            return null;
-        }
+        console.log(`Transcript engine requested: ${engine}, using WhisperX via Python`);
 
-        const whisperVariant: 'cpu' | 'gpu' | 'vulkan' =
-            engine === 'whisper-gpu' ? 'gpu' :
-                engine === 'whisper-vulkan' ? 'vulkan' : 'cpu';
-
-        console.log(`Transcript engine requested: ${engine}, using variant: ${whisperVariant}`);
-
-        if (!isWhisperEngineReady(whisperVariant)) {
-            const engineLabel = whisperVariant === 'gpu' ? 'GPU (CUDA)'
-                : whisperVariant === 'vulkan' ? 'GPU (Vulkan - AMD/Intel/NVIDIA)'
-                    : 'CPU';
-            onProgress({ status: 'downloading', progress: 0, detail: `Downloading Whisper (${engineLabel})...` });
-            const downloaded = await downloadWhisperEngine(whisperVariant, (p) => {
-                onProgress({
-                    status: 'downloading',
-                    progress: p.progress * 0.15, // Map 0-100 → 0-15
-                    detail: p.detail
-                });
-            });
-            if (!downloaded) {
-                onProgress({ status: 'error', progress: 0, detail: 'Failed to download Whisper engine!' });
-                return null;
-            }
-        }
+        onProgress({ status: 'preparing', progress: 10, detail: 'Checking WhisperX environment...' });
+        // NOTE: We assume whisperx is installed globally via pip.
+        // We will catch execution errors if it's missing during the actual processing step.
 
         onProgress({ status: 'preparing', progress: 15, detail: 'Finding audio file...' });
         const audioFile = findAudioFile(projectPath);
@@ -249,9 +247,10 @@ export const transcribeAudio = async (
 
         onProgress({ status: 'transcribing', progress: 30, detail: 'Starting voice recognition...' });
 
-        console.log(`Starting Whisper transcription with variant: ${whisperVariant} and path: ${getWhisperPath(whisperVariant)}`);
-        const videoId = path.basename(audioFile, path.extname(audioFile));
-        const srtPath = await runWhisper(wavPath, transcriptDir, videoId, onProgress, whisperVariant, language);
+        console.log(`Starting WhisperX transcription with variant: ${engine}`);
+        // Base name output logic inside runWhisperX handles the .srt suffix automatically from outputDir
+        const hfToken = getApiKey("huggingface");
+        const srtPath = await runWhisperX(wavPath, transcriptDir, onProgress, engine as any, language, hfToken);
 
         if (!srtPath) {
             onProgress({ status: 'error', progress: 0, detail: 'Voice recognition failed!' });

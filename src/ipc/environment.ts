@@ -36,7 +36,7 @@ export const setupEnvironmentIpc = () => {
     });
 
     ipcMain.handle("check-whisper-engine", (_event, engine: string) => {
-        return isWhisperEngineReady(engine as "cpu" | "gpu" | "vulkan");
+        return isWhisperEngineReady(engine as "cpu" | "gpu" | "openblas");
     });
 
     ipcMain.handle("list-whisper-models", () => {

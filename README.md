@@ -24,7 +24,8 @@
 **Những tính năng và công dụng chính bao gồm:**
 - **Tự động hóa hoàn toàn:** Nhận link gốc (như YouTube), phần mềm tự động tải video, tách âm thanh, nhận diện giọng đọc để tạo phụ đề (SRT), dịch thuật và lồng một giọng đọc AI mới.
 - **Sản xuất nội dung đa ngôn ngữ:** Phù hợp cho các nhà sáng tạo nội dung muốn đẩy mạnh video của mình ra toàn cầu, hỗ trợ đa dạng ngôn ngữ như Tiếng Anh, Nhật, Trung, Pháp, Đức,...
-- **Lồng tiếng chuyên nghiệp (Edge TTS):** Cung cấp các giọng đọc có chất lượng cao và tự nhiên, hỗ trợ tự động canh chỉnh khoảng cách, tăng hoặc giảm tốc độ đọc để khớp với khẩu hình gốc.
+- **Lồng tiếng chuyên nghiệp (Piper & Edge TTS):** Cung cấp các giọng đọc chất lượng cao. Hỗ trợ **Piper (Offline)** cho tốc độ và bảo mật, hoặc Edge TTS cho sự đa dạng. Tự động canh chỉnh tốc độ đọc để khớp với video.
+- **Audio Ducking:** Tự động trộn âm thanh AI với nhạc nền của video gốc, giảm âm lượng nền khi có tiếng nói để đảm bảo chất lượng âm thanh chuyên nghiệp.
 - **Chất lượng hiển thị và đồng bộ:** Khắc phục triệt để vấn đề lệch âm thanh (Audio Sync) bằng việc sử dụng HandBrake để thiết lập Constant Framerate (CFR) sau bước ghép video.
 
 ---
@@ -35,9 +36,10 @@ Hệ thống được chia sẻ thành các module độc lập, với Flow xử
 
 1. **Download Phase:** Chịu trách nhiệm lấy video và audio gốc thông qua tiến trình con gọi `yt-dlp`.
 2. **Transcribe Phase:** Trích xuất lời thoại từ video thông qua AI Whisper cục bộ. Tự động chia các mốc thời gian hoàn hảo.
-3. **Translate Phase:** Cung cấp giao diện dịch phụ đề nhanh chóng thông qua các API dịch ngoại vi. Rất mạnh mẽ với những yêu cầu chuyên ngành (Ví dụ: tự cấu hình prompt dịch các thuật ngữ Game, chuyên ngành y tế,...).
-4. **TTS Phase (Text-to-Speech):** Sử dụng dịch vụ Edge TTS (`msedge-tts`) nhằm biến văn bản đã dịch thành các file âm thanh (`mp3`) tương ứng với từng mốc thời gian phụ đề.
-5. **Final Video Phase:** Ghép nối các file âm thanh với video gốc. Xử lý khoảng trống (gap), chèn âm thanh nền, re-encode đồng bộ thông qua GPU NVENC, đảm bảo không có khung hình chết (frozen frames).
+3. **Translate Phase:** Cung cấp giao diện dịch phụ đề nhanh chóng thông qua các API dịch ngoại vi.
+4. **TTS Phase (Text-to-Speech):** Sử dụng **Piper** (Cục bộ) hoặc **Edge TTS** nhằm biến văn bản đã dịch thành các file âm thanh.
+5. **Final Video Phase:** Ghép nối các file âm thanh với video gốc. Xử lý khoảng trống (gap), **trộn âm thanh nền (Ducking)**, re-encode đồng bộ thông qua GPU NVENC, đảm bảo không có khung hình chết (frozen frames).
+6. **AI Agent Integration (MCP):** Cung cấp giao diện **Model Context Protocol** để các trợ lý AI có thể tương tác trực tiếp với dự án.
 
 ---
 
@@ -58,9 +60,9 @@ Hệ thống được chia sẻ thành các module độc lập, với Flow xử
 Dự án áp dụng mô hình kiến trúc hai chiều của Electron kết hợp cùng các công nghệ hiện đại nhất:
 - **Core App Framework:** Electron v40 (Node.js).
 - **Frontend Framework:** React 19, TypeScript, kết hợp Vite.
-- **Thiết kế Giao diện (UI/UX):** Tailwind CSS v4, shadcn/ui.
-- **Database cục bộ:** Better-sqlite3 đi kèm mã hóa ciphers.
-- **Xử lý hội thoại:** API Microsoft Edge TTS (`msedge-tts`), Parse phụ đề (`srt-utils`).
+- **Thiết kế Giao diện (UI/UX):** **Tailwind CSS v4**, shadcn/ui, Framer Motion.
+- **Database cục bộ:** Better-sqlite3.
+- **AI Integration:** **Piper TTS** (Offline), Whisper.cpp, Model Context Protocol (MCP SDK).
 - **Terminal Parsing:** Child Process (`spawn`) chạy script liên kết với hệ thống Windows PowerShell.
 
 ---

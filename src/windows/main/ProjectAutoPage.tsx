@@ -16,12 +16,14 @@ import ReactCountryFlag from "react-country-flag";
 import { motion, AnimatePresence } from "motion/react";
 import { useAutoPipeline, type AutoPhase, AUTO_PHASE_LABELS } from "@/stores/AutoPipelineStore";
 import { useHardwareStore } from "@/stores/HardwareStore";
+import { useProcessContext } from "@/stores/ProcessStore";
 
 export const ProjectAutoPage = () => {
     const { id } = useParams();
     const navigate = useNavigate();
     const { currentPhase, setCurrentPhase, markPhaseCompleted, resetPipeline } = useAutoPipeline();
-    const { hasNvidiaGpu, hasVulkanGpu } = useHardwareStore();
+    const { hasNvidiaGpu } = useHardwareStore();
+    const { setIsProcessing: setGlobalProcessing } = useProcessContext();
 
     const [projectPath, setProjectPath] = useState("");
     const [projectName, setProjectName] = useState("");
@@ -30,7 +32,7 @@ export const ProjectAutoPage = () => {
     const [error, setError] = useState<string | null>(null);
 
     // Config state
-    const [whisperEngine, setWhisperEngine] = useState("whisper-cpu");
+    const [whisperEngine, setWhisperEngine] = useState("whisper-openblas");
     const [sourceLanguage, setSourceLanguage] = useState("auto");
     const [targetLanguage, setTargetLanguage] = useState("vi");
     const [selectedPromptId, setSelectedPromptId] = useState("");
@@ -41,8 +43,11 @@ export const ProjectAutoPage = () => {
     const abortRef = useRef(false);
 
     useEffect(() => {
-        return () => { resetPipeline(); };
-    }, []);
+        return () => { 
+            resetPipeline(); 
+            setGlobalProcessing(false);
+        };
+    }, [resetPipeline, setGlobalProcessing]);
 
     useEffect(() => {
         const init = async () => {
@@ -341,10 +346,9 @@ ${userPrompt}`.trim();
                                             <SelectValue />
                                         </SelectTrigger>
                                         <SelectContent>
-                                            <SelectItem value="whisper-cpu">Whisper.cpp (CPU)</SelectItem>
+                                            <SelectItem value="whisper-cpu">Whisper.cpp (CPU Cơ bản)</SelectItem>
+                                            <SelectItem value="whisper-openblas">Whisper.cpp (OpenBLAS - CPU Tăng Tốc)</SelectItem>
                                             <SelectItem value="whisper-gpu" disabled={!hasNvidiaGpu}>Whisper.cpp (NVIDIA CUDA) {!hasNvidiaGpu && "(Không hỗ trợ)"}</SelectItem>
-                                            <SelectItem value="whisper-vulkan" disabled={!hasVulkanGpu}>Whisper.cpp (Vulkan - AMD/Intel) {!hasVulkanGpu && "(Không hỗ trợ)"}</SelectItem>
-                                            <SelectItem value="assemblyai">AssemblyAI (Cloud)</SelectItem>
                                         </SelectContent>
                                     </Select>
                                 </div>

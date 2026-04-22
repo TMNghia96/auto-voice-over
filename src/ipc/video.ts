@@ -1,8 +1,10 @@
 import {ipcMain, dialog} from "electron";
 import {getVideoInfo, downloadVideo} from "../services/VideoService";
-import {createFinalVideo} from "../services/FinalVideoService";
-import {getFfmpegPath} from "../services/EnvironmentService";
-import {spawn} from "child_process";
+import { createFinalVideo, cancelFinalVideo } from "../services/FinalVideoService";
+import { getFfmpegPath } from "../services/EnvironmentService";
+import { 
+} from "../services/ConfigService";
+import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 
@@ -187,18 +189,42 @@ export const setupVideoIpc = () => {
 		};
 	});
 
-	ipcMain.on("create-final-video", async (event, projectPath: string) => {
+
+
+
+	ipcMain.on("create-final-video", async (event, projectPath: string, options?: { backgroundVolume?: number, fadeDuration?: number }) => {
 		try {
-			await createFinalVideo(projectPath, (p) => {
-				event.sender.send("final-video-progress", p);
-			});
+			await createFinalVideo(
+                projectPath, 
+                (p) => {
+                    if (!event.sender.isDestroyed()) {
+                        try {
+                            event.sender.send("final-video-progress", p);
+                        } catch (e) {
+                            console.warn("Failed to send progress, window may be closed", e);
+                        }
+                    }
+                }, 
+                options?.backgroundVolume ?? 0.15,
+                options?.fadeDuration ?? 0.5
+            );
 		} catch (err) {
 			console.error("Create final video failed:", err);
-			event.sender.send("final-video-progress", {
-				status: "error",
-				progress: 0,
-				detail: `Lỗi: ${err}`,
-			});
+			if (!event.sender.isDestroyed()) {
+				try {
+					event.sender.send("final-video-progress", {
+						status: "error",
+						progress: 0,
+						detail: `Lỗi: ${err}`,
+					});
+				} catch (e) {
+					console.warn("Failed to send error, window may be closed", e);
+				}
+			}
 		}
+	});
+
+	ipcMain.on("cancel-final-video", () => {
+		cancelFinalVideo();
 	});
 };

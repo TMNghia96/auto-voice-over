@@ -9,7 +9,6 @@ export const HardwareDetectPage = () => {
     const {
         hasNvidiaGpu,
         hasAmdGpu,
-        hasVulkanGpu,
         cpuName,
         totalRamGB,
         gpus,
@@ -95,35 +94,33 @@ export const HardwareDetectPage = () => {
                 </Card>
 
                 {/* Status Card */}
-                <Card className={hasVulkanGpu ? "border-green-500/50 bg-green-500/5" : "border-amber-500/50 bg-amber-500/5"}>
+                <Card className={hasNvidiaGpu ? "border-green-500/50 bg-green-500/5" : "border-blue-500/50 bg-blue-500/5"}>
                     <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-                        <CardTitle className="text-sm font-medium">Whisper GPU</CardTitle>
-                        <Zap className={`h-4 w-4 ${hasNvidiaGpu ? 'text-green-500' : 'text-amber-500'}`} />
+                        <CardTitle className="text-sm font-medium">Whisper Engine</CardTitle>
+                        <Zap className={`h-4 w-4 ${hasNvidiaGpu ? 'text-green-500' : 'text-blue-500'}`} />
                     </CardHeader>
                     <CardContent>
                         <div className="flex items-center gap-2">
-                            {hasVulkanGpu ? (
+                            {hasNvidiaGpu ? (
                                 <>
                                     <CheckCircle2 className="w-5 h-5 text-green-500" />
                                     <span className="text-sm font-semibold text-green-600 dark:text-green-500">
-                                        {hasNvidiaGpu ? "Hỗ trợ CUDA & Vulkan" : "Hỗ trợ Vulkan"}
+                                        Hỗ trợ CUDA (Tăng tốc GPU)
                                     </span>
                                 </>
                             ) : (
                                 <>
-                                    <XCircle className="w-5 h-5 text-amber-500" />
-                                    <span className="text-sm font-semibold text-amber-600 dark:text-amber-500">
-                                        Không có Tăng tốc GPU
+                                    <CheckCircle2 className="w-5 h-5 text-blue-500" />
+                                    <span className="text-sm font-semibold text-blue-600 dark:text-blue-500">
+                                        CPU + OpenBLAS sẵn sàng
                                     </span>
                                 </>
                             )}
                         </div>
                         <p className="text-xs text-muted-foreground mt-2">
                             {hasNvidiaGpu
-                                ? "Hệ thống hỗ trợ tăng tốc NVIDIA CUDA."
-                                : hasVulkanGpu
-                                    ? "Hệ thống hỗ trợ tăng tốc Vulkan (AMD/Intel)."
-                                    : "Không tìm thấy GPU rời phù hợp để tăng tốc."}
+                                ? "Hệ thống hỗ trợ tăng tốc NVIDIA CUDA + OpenBLAS."
+                                : "Sử dụng CPU với OpenBLAS để tăng tốc xử lý."}
                         </p>
                     </CardContent>
                 </Card>
@@ -153,10 +150,12 @@ export const HardwareDetectPage = () => {
                                             <p className="font-medium text-sm">{gpu}</p>
                                             <p className="text-xs text-muted-foreground">
                                                 {gpu.toLowerCase().includes("nvidia")
-                                                    ? "Hỗ trợ CUDA & Vulkan"
-                                                    : (gpu.toLowerCase().includes("amd") || gpu.toLowerCase().includes("radeon") || gpu.toLowerCase().includes("intel"))
-                                                        ? "Hỗ trợ Tăng tốc Vulkan"
-                                                        : "GPU Tích hợp / Khác"}
+                                                    ? "Hỗ trợ CUDA (Tăng tốc GPU)"
+                                                    : (gpu.toLowerCase().includes("amd") || gpu.toLowerCase().includes("radeon"))
+                                                        ? "AMD GPU"
+                                                        : gpu.toLowerCase().includes("intel")
+                                                            ? "Intel GPU"
+                                                            : "GPU Tích hợp / Khác"}
                                             </p>
                                         </div>
                                     </div>
@@ -187,3 +186,4 @@ export const HardwareDetectPage = () => {
         </div>
     );
 };
+

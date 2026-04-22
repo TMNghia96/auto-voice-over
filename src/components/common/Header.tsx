@@ -7,6 +7,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useProcessContext } from "@/stores/ProcessStore";
 import { useAutoPipeline, AUTO_PHASE_LABELS } from "@/stores/AutoPipelineStore";
 import { motion } from "motion/react";
+import { matchesProjectId } from "@/lib/BrowserPathUtils";
 
 export const Header = () => {
     const navigate = useNavigate();
@@ -33,10 +34,11 @@ export const Header = () => {
         final: false
     });
 
+
     useEffect(() => {
         if (projectId) {
             window.api.getProjects().then((projects) => {
-                const proj = projects.find(p => p.id === projectId);
+                const proj = projects.find(p => matchesProjectId(p, projectId));
                 if (proj) {
                     setProjectName(proj.name);
                     setProjectPath(proj.path);

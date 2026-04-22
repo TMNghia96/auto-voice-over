@@ -4,7 +4,6 @@ import { useParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import {
-
     Volume2,
     CheckCircle2,
     Play,
@@ -19,6 +18,7 @@ import { TooltipProvider, Tooltip, TooltipTrigger, TooltipContent } from "@/comp
 import { parseSrt, TARGET_LANGUAGES, type SrtEntry } from "@/lib/utils";
 import { useProcessContext } from "@/stores/ProcessStore";
 import ReactCountryFlag from "react-country-flag";
+import { matchesProjectId } from "@/lib/BrowserPathUtils";
 
 interface AudioProgress {
     status: 'generating' | 'done' | 'error';
@@ -34,7 +34,7 @@ type EntryAudioStatus = 'pending' | 'generating' | 'done' | 'failed';
 
 export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) => {
     const { id } = useParams();
-    const [phase, setPhase] = useState<"loading" | "no-translation" | "ready">("loading");
+    const [phase, setPhase] = useState<"loading" | "no-translation" | "ready" | "error">("loading");
     const [projectPath, setProjectPath] = useState("");
     const [translatedEntries, setTranslatedEntries] = useState<SrtEntry[]>([]);
     const [translatedLang, setTranslatedLang] = useState("");
@@ -49,58 +49,72 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
 
     const retryCountRef = useRef(0);
 
+    const [error, setError] = useState<string | null>(null);
+
     useEffect(() => {
         setGlobalProcessing(isGenerating);
     }, [isGenerating, setGlobalProcessing]);
 
     useEffect(() => {
         const init = async () => {
-            const projects = await window.api.getProjects();
-            const project = projects.find((p: any) => p.id === id);
-            if (!project) {
+            try {
                 setPhase("loading");
-                return;
-            }
-            setProjectPath(project.path);
+                setError(null);
 
-            const langs = ["vi", "zh", "ja", "ko", "fr", "de", "es", "pt", "ru", "en", "th"];
-            let foundLang = "";
-            let foundContent = "";
-
-            for (const lang of langs) {
-                const content = await window.api.getTranslatedSrt(project.path, lang);
-                if (content) {
-                    foundLang = lang;
-                    foundContent = content;
-                    break;
+                const projects = await window.api.getProjects();
+                const project = projects.find((p: any) => matchesProjectId(p, id));
+                if (!project) {
+                    console.error("[AudioGeneratePhase] Project not found for ID:", id);
+                    setPhase("error");
+                    return;
                 }
-            }
+                setProjectPath(project.path);
 
-            if (foundContent && foundLang) {
-                const entries = parseSrt(foundContent);
-                setTranslatedEntries(entries);
-                setTranslatedLang(foundLang);
+                const langs = ["vi", "zh", "ja", "ko", "fr", "de", "es", "pt", "ru", "en", "th"];
+                let foundLang = "";
+                let foundContent = "";
 
-                const existingAudio = await window.api.listGeneratedAudio(project.path);
-                if (existingAudio && existingAudio.length > 0) {
-                    setAudioFiles(existingAudio);
-                    const statuses = new Map<number, EntryAudioStatus>();
-                    entries.forEach(entry => {
-                        const baseName = `${String(entry.index).padStart(4, '0')}`;
-                        const hasAudio = existingAudio.some((f: { name: string }) =>
-                            f.name === `${baseName}.mp3` || f.name === `${baseName}.wav`
-                        );
-                        statuses.set(entry.index, hasAudio ? 'done' : 'pending');
-                    });
-                    setEntryStatuses(statuses);
+                for (const lang of langs) {
+                    const content = await window.api.getTranslatedSrt(project.path, lang);
+                    if (content) {
+                        foundLang = lang;
+                        foundContent = content;
+                        break;
+                    }
                 }
-                setPhase("ready");
-            } else {
-                setPhase("no-translation");
+
+                if (foundContent && foundLang) {
+                    const entries = parseSrt(foundContent);
+                    setTranslatedEntries(entries);
+                    setTranslatedLang(foundLang);
+
+                    const existingAudio = await window.api.listGeneratedAudio(project.path);
+                    if (existingAudio && existingAudio.length > 0) {
+                        setAudioFiles(existingAudio);
+                        const statuses = new Map<number, EntryAudioStatus>();
+                        entries.forEach(entry => {
+                            const baseName = `${String(entry.index).padStart(4, '0')}`;
+                            const hasAudio = existingAudio.some((f: { name: string }) =>
+                                f.name === `${baseName}.mp3` || f.name === `${baseName}.wav`
+                            );
+                            statuses.set(entry.index, hasAudio ? 'done' : 'pending');
+                        });
+                        setEntryStatuses(statuses);
+                    }
+                    setPhase("ready");
+                } else {
+                    setPhase("no-translation");
+                }
+            } catch (err: any) {
+                console.error("[AudioGeneratePhase] Init failed:", err);
+                setError(err.message || "Đã xảy ra lỗi khi tải dữ liệu âm thanh");
+                setPhase("error");
             }
         };
 
-        init();
+        if (id) {
+            init();
+        }
     }, [id]);
 
     useEffect(() => {
@@ -209,8 +223,28 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
 
     if (phase === "loading") {
         return (
-            <div className="flex items-center justify-center h-full">
+            <div className="flex flex-col items-center justify-center h-full gap-4">
                 <Spinner className="w-8 h-8 animate-spin text-primary" />
+                <span className="text-sm text-muted-foreground animate-pulse">Đang nạp dữ liệu âm thanh...</span>
+            </div>
+        );
+    }
+
+    if (phase === "error") {
+        return (
+            <div className="flex flex-col items-center justify-center h-full p-4 text-center space-y-4">
+                <div className="w-16 h-16 rounded-full bg-destructive/10 flex items-center justify-center text-destructive">
+                    <AlertCircle className="w-8 h-8" />
+                </div>
+                <div className="space-y-1">
+                    <h2 className="text-xl font-bold">Lỗi khởi tạo</h2>
+                    <p className="text-sm text-muted-foreground max-w-sm">
+                        {error || "Không thể tìm thấy hoặc tải dữ liệu dự án."}
+                    </p>
+                </div>
+                <Button variant="outline" onClick={() => window.location.href = '/'}>
+                    Quay lại Trang chủ
+                </Button>
             </div>
         );
     }
@@ -231,7 +265,7 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
 
     return (
         <TooltipProvider>
-            <div className="flex flex-col p-4 gap-4 max-w-7xl w-full mx-auto h-full overflow-hidden">
+            <div className="flex flex-col p-4 gap-4 max-w-7xl w-full mx-auto h-full overflow-hidden min-h-[400px]">
                 <div className="flex items-center justify-between shrink-0">
                     <div className="flex items-center gap-3">
                         <Volume2 className="w-5 h-5 text-primary" />

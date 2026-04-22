@@ -185,3 +185,22 @@ export const setActivePromptId = (id: string): boolean => {
     return writeConfig({ activePromptId: id });
 };
 
+export const getDefaultBackgroundVolume = (): number => {
+    const config = readConfig();
+    return config.defaultBackgroundVolume ?? 10;
+};
+
+export const setDefaultBackgroundVolume = (volume: number): boolean => {
+    const clamped = Math.max(0, Math.min(100, Math.round(volume)));
+    return writeConfig({ defaultBackgroundVolume: clamped });
+};
+
+export const getDefaultFadeDuration = (): number => {
+    const config = readConfig();
+    return config.defaultFadeDuration ?? 0.5;
+};
+
+export const setDefaultFadeDuration = (duration: number): boolean => {
+    const clamped = Math.max(0, Math.min(2.0, duration));
+    return writeConfig({ defaultFadeDuration: clamped });
+};

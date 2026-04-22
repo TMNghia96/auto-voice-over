@@ -52,10 +52,6 @@ interface Window {
 
         checkWhisperEngine: (engine: string) => Promise<boolean>;
 
-        compileWhisperVulkan: () => void;
-        onCompileProgress: (callback: (progress: { step: string; message: string; progress: number; state: string; error?: string }) => void) => void;
-        onCompileComplete: (callback: (result: { success: boolean; error?: string }) => void) => void;
-        removeCompileListeners: () => void;
 
         getWhisperDownloadStatus: () => Promise<{ modelId: string | null; percent: number }>;
         listWhisperModels: () => Promise<Array<{
@@ -88,7 +84,8 @@ interface Window {
         readVideoFile: (filePath: string) => Promise<string | null>;
 
         checkFinalVideoReady: (projectPath: string) => Promise<{ ready: boolean; missing?: string; existingFinal?: string | null }>;
-        createFinalVideo: (projectPath: string) => void;
+        createFinalVideo: (projectPath: string, options?: { backgroundVolume?: number; fadeDuration?: number }) => void;
+        cancelFinalVideo: () => void;
         onFinalVideoProgress: (callback: (progress: any) => void) => void;
         removeFinalVideoListeners: () => void;
         openInExplorer: (filePath: string) => Promise<boolean>;
@@ -100,5 +97,10 @@ interface Window {
             audio: boolean;
             final: boolean;
         }>;
+
+        getDefaultBackgroundVolume: () => Promise<number>;
+        setDefaultBackgroundVolume: (volume: number) => Promise<boolean>;
+        getDefaultFadeDuration: () => Promise<number>;
+        setDefaultFadeDuration: (duration: number) => Promise<boolean>;
     };
 }

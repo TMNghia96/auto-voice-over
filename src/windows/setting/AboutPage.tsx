@@ -197,7 +197,7 @@ export const AboutPage = () => {
                     </p>
                     <ul className="list-disc list-inside space-y-2 text-muted-foreground leading-relaxed">
                         <li>Mọi video, âm thanh, text (prompt) xử lý bằng AI nội bộ (Local Whisper/Local Model) sẽ không bao giờ được gửi, thu thập hay chia sẻ lên bất kỳ máy chủ nào. Nó hoàn toàn nằm trên máy tính của bạn.</li>
-                        <li>Trong trường hợp bạn sử dụng các tính năng tích hợp API Cloud (như AssemblyAI hay DeepSeek), dữ liệu nhất thiết phải được gửi tới các nền tảng đó để xử lý. Vui lòng tham khảo chính sách bảo mật của các hãng cung cấp (DeepSeek/AssemblyAI) để biết họ sử dụng dữ liệu như thế nào.</li>
+                        <li>Trong trường hợp bạn sử dụng các tính năng tích hợp API Cloud (như DeepSeek), dữ liệu nhất thiết phải được gửi tới các nền tảng đó để xử lý. Vui lòng tham khảo chính sách bảo mật của các hãng cung cấp để biết họ sử dụng dữ liệu như thế nào.</li>
                         <li>Phần mềm không đính kèm mã theo dõi (tracking, analytics) nhắm mục tiêu cá nhân hoặc đánh cắp thông tin nhạy cảm. Thư mục Database (SQLite) được lưu giữ cô lập tại thiết bị của bạn.</li>
                     </ul>
                 </div>

@@ -227,7 +227,7 @@ export const HomePage = () => {
                                     </p>
                                 </div>
                                 <div className="mt-4 text-xs text-muted-foreground">
-                                    Đã tạo: {new Date(project.createdAt).toLocaleDateString()}
+                                    Đã tạo: {project.createdAt ? new Date(project.createdAt).toLocaleDateString() : "Không rõ"}
                                 </div>
                             </div>
                         ))}

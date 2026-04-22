@@ -14,12 +14,15 @@ import {
     FolderOpen,
     Pencil,
     Check,
-    X
+    X,
+    AlertCircle
 } from "lucide-react";
 import { parseSrt, stringifySrt, TARGET_LANGUAGES, type SrtEntry } from "@/lib/utils";
 import { useProcessContext } from "@/stores/ProcessStore";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import ReactCountryFlag from "react-country-flag";
+
+import { matchesProjectId } from "@/lib/BrowserPathUtils";
 
 export const TranslatePhase = ({ onComplete }: { onComplete?: () => void }) => {
     const { id } = useParams();
@@ -43,49 +46,69 @@ export const TranslatePhase = ({ onComplete }: { onComplete?: () => void }) => {
         setGlobalProcessing(phase === "translating");
     }, [phase, setGlobalProcessing]);
 
+    const [error, setError] = useState<string | null>(null);
+
     useEffect(() => {
         const init = async () => {
-            setSrtEntries([]);
-            setTranslatedEntries([]);
-            setPhase("idle");
+            try {
+                setIsChecking(true);
+                setError(null);
+                setSrtEntries([]);
+                setTranslatedEntries([]);
+                setPhase("idle");
 
-            const apiKey = await window.api.getApiKey("deepseek");
-            setHasApiKey(!!apiKey);
+                const apiKey = await window.api.getApiKey("deepseek");
+                setHasApiKey(!!apiKey);
 
-            const loadedPrompts = await window.api.getPrompts();
-            setPrompts(loadedPrompts);
-            const activePromptId = await window.api.getActivePromptId();
-            if (activePromptId && loadedPrompts.find(p => p.id === activePromptId)) {
-                setSelectedPromptId(activePromptId);
-            } else if (loadedPrompts.length > 0) {
-                setSelectedPromptId(loadedPrompts[0].id);
-            }
+                const loadedPrompts = (await window.api.getPrompts()) || [];
+                setPrompts(loadedPrompts);
+                
+                const activePromptId = await window.api.getActivePromptId();
+                if (activePromptId && loadedPrompts.find((p: any) => p.id === activePromptId)) {
+                    setSelectedPromptId(activePromptId);
+                } else if (loadedPrompts.length > 0) {
+                    setSelectedPromptId(loadedPrompts[0].id);
+                }
 
-            const projects = await window.api.getProjects();
-            const project = projects.find((p: any) => p.id === id);
-            if (project) {
-                setProjectPath(project.path);
+                const projects = await window.api.getProjects();
+                const project = projects.find((p: any) => matchesProjectId(p, id));
+                if (project) {
+                    setProjectPath(project.path);
 
-                const existing = await window.api.getExistingSrt(project.path);
-                if (existing) {
-                    const entries = parseSrt(existing.srtContent);
-                    setSrtEntries(entries);
+                    const existing = await window.api.getExistingSrt(project.path);
+                    if (existing) {
+                        try {
+                            const entries = parseSrt(existing.srtContent);
+                            setSrtEntries(entries);
 
-                    const translatedContent = await window.api.getTranslatedSrt(project.path, selectedLang);
-                    if (translatedContent) {
-                        setTranslatedEntries(parseSrt(translatedContent));
-                        setPhase("done");
+                            const translatedContent = await window.api.getTranslatedSrt(project.path, selectedLang);
+                            if (translatedContent) {
+                                setTranslatedEntries(parseSrt(translatedContent));
+                                setPhase("done");
+                            } else {
+                                setPhase("idle");
+                            }
+                        } catch (srtError) {
+                            console.error("Failed to parse SRT:", srtError);
+                            setPhase("no-srt");
+                        }
                     } else {
-                        setPhase("idle");
+                        setPhase("no-srt");
                     }
                 } else {
-                    setPhase("no-srt");
+                    console.error("[TranslatePhase] Project not found for ID:", id);
                 }
+            } catch (err: any) {
+                console.error("TranslatePhase init failed:", err);
+                setError(err.message || "Đã xảy ra lỗi không xác định");
+            } finally {
+                setIsChecking(false);
             }
-            setIsChecking(false);
         };
 
-        init();
+        if (id) {
+            init();
+        }
     }, [id]);
 
     useEffect(() => {
@@ -249,16 +272,51 @@ ${userPrompt}`.trim();
         window.api.openInExplorer(filePath);
     };
 
+    if (error) {
+        return (
+            <div className="flex flex-col items-center justify-center p-6 space-y-4 text-center">
+                <div className="w-16 h-16 rounded-full bg-destructive/10 flex items-center justify-center text-destructive">
+                    <AlertCircle className="w-8 h-8" />
+                </div>
+                <div>
+                    <h2 className="text-xl font-bold">Lỗi khởi tạo</h2>
+                    <p className="text-muted-foreground text-sm max-w-md">{error}</p>
+                </div>
+                <Button onClick={() => window.location.reload()}>
+                    Thử lại
+                </Button>
+            </div>
+        );
+    }
+
     if (isChecking) {
         return (
-            <div className="flex items-center justify-center h-full">
+            <div className="flex flex-col items-center justify-center h-full gap-4">
                 <Spinner className="w-8 h-8 animate-spin text-primary" />
+                <span className="text-sm text-muted-foreground animate-pulse">Đang kiểm tra dữ liệu...</span>
+            </div>
+        );
+    }
+
+    if (!projectPath && !error) {
+        return (
+            <div className="flex flex-col items-center justify-center h-full p-4 text-center space-y-4">
+                <div className="w-16 h-16 rounded-2xl bg-muted flex items-center justify-center">
+                    <AlertCircle className="w-8 h-8 text-muted-foreground" />
+                </div>
+                <div className="space-y-1">
+                    <h2 className="text-xl font-bold">Không tìm thấy dự án</h2>
+                    <p className="text-sm text-muted-foreground">ID dự án không hợp lệ hoặc đã bị di chuyển.</p>
+                </div>
+                <Button variant="outline" onClick={() => window.location.href = '/'}>
+                    Quay lại Trang chủ
+                </Button>
             </div>
         );
     }
 
     return (
-        <div className="flex flex-col items-center justify-center p-4 space-y-4 max-w-7xl w-full mx-auto h-full">
+        <div className="flex flex-col items-center justify-center p-4 space-y-4 max-w-7xl w-full mx-auto h-full min-h-[400px]">
 
             {phase === "no-srt" && (
                 <div className="text-center space-y-4 animate-in fade-in duration-300">

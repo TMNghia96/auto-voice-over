@@ -1,4 +1,4 @@
-import {createContext, useContext, useState, ReactNode} from "react";
+import {createContext, useContext, useState, ReactNode, useMemo} from "react";
 
 interface ProcessContextType {
 	isProcessing: boolean;
@@ -17,8 +17,10 @@ export const useProcessContext = () => useContext(ProcessContext);
 export const ProcessProvider = ({children}: {children: ReactNode}) => {
 	const [isProcessing, setIsProcessing] = useState(false);
 
+	const value = useMemo(() => ({isProcessing, setIsProcessing}), [isProcessing]);
+
 	return (
-		<ProcessContext.Provider value={{isProcessing, setIsProcessing}}>
+		<ProcessContext.Provider value={value}>
 			{children}
 		</ProcessContext.Provider>
 	);

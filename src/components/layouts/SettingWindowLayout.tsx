@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { Settings, Cpu, Key, AudioLines, FileText, MonitorDot, Info } from "lucide-react";
+import { Settings, Cpu, Key, AudioLines, FileText, MonitorDot, Info, Share2 } from "lucide-react";
 import "@/stores/ModelDownloadStore";
 import {
     SidebarProvider,
@@ -17,12 +17,12 @@ import {
 } from "@/components/ui/sidebar";
 import { WhisperModelPage } from "@/windows/setting/WhisperModelPage";
 import { DeepseekKeyPage } from "@/windows/setting/DeepseekKeyPage";
-import { AssemblyaiKeyPage } from "@/windows/setting/AssemblyaiKeyPage";
+import { HuggingFaceKeyPage } from "@/windows/setting/HuggingFaceKeyPage";
 import { PromptTranslateManagerPage } from "@/windows/setting/PromptTranslateManagerPage";
 import { HardwareDetectPage } from "@/windows/setting/HardwareDetectPage";
-import { AboutPage } from "@/windows/setting/AboutPage";
+import { McpSettingsPage } from "@/windows/setting/McpSettingsPage";
 
-type SettingTab = "whisper-model" | "deepseek-key" | "assemblyai-key" | "prompt-translate" | "hardware-detect" | "about";
+type SettingTab = "whisper-model" | "deepseek-key" | "huggingface-key" | "prompt-translate" | "hardware-detect" | "mcp-settings";
 
 interface TabConfig {
     id: SettingTab;
@@ -45,28 +45,28 @@ export const TABS: TabConfig[] = [
         component: WhisperModelPage,
     },
     {
+        id: "mcp-settings",
+        label: "MCP Server",
+        icon: Share2,
+        component: McpSettingsPage,
+    },
+    {
+        id: "huggingface-key",
+        label: "HF Token (VAD)",
+        icon: Key,
+        component: HuggingFaceKeyPage,
+    },
+    {
         id: "deepseek-key",
         label: "DeepSeek Key",
         icon: Key,
         component: DeepseekKeyPage,
     },
     {
-        id: "assemblyai-key",
-        label: "AssemblyAI Key",
-        icon: AudioLines,
-        component: AssemblyaiKeyPage,
-    },
-    {
         id: "prompt-translate",
         label: "Prompt Dịch",
         icon: FileText,
         component: PromptTranslateManagerPage,
-    },
-    {
-        id: "about",
-        label: "Giới thiệu",
-        icon: Info,
-        component: AboutPage,
     },
 ];
 
@@ -94,7 +94,7 @@ export const SettingWindowLayout = ({ children }: SettingWindowLayoutProps) => {
                         <SidebarGroup>
                             <SidebarGroupLabel>Cấu hình</SidebarGroupLabel>
                             <SidebarMenu>
-                                {TABS.filter(t => t.id !== "about").map((t) => (
+                                {TABS.map((t) => (
                                     <SidebarMenuItem key={t.id}>
                                         <SidebarMenuButton
                                             isActive={activeTab === t.id}
@@ -109,21 +109,6 @@ export const SettingWindowLayout = ({ children }: SettingWindowLayoutProps) => {
                             </SidebarMenu>
                         </SidebarGroup>
                     </SidebarContent>
-
-                    <SidebarFooter>
-                        <SidebarMenu>
-                            <SidebarMenuItem>
-                                <SidebarMenuButton
-                                    isActive={activeTab === "about"}
-                                    onClick={() => navigate(`/settings/about`)}
-                                    tooltip="Giới thiệu"
-                                >
-                                    <Info className="w-4 h-4" />
-                                    <span>Giới thiệu</span>
-                                </SidebarMenuButton>
-                            </SidebarMenuItem>
-                        </SidebarMenu>
-                    </SidebarFooter>
                 </Sidebar>
 
                 <SidebarInset className="min-h-0 overflow-hidden">

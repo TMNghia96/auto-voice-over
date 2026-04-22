@@ -4,7 +4,7 @@ import { setupEnvironmentIpc } from "./environment";
 import { setupAudioIpc } from "./audio";
 import { setupSystemIpc } from "./system";
 import { setupHardwareIpc } from "./hardware";
-import { setupCompileIpc } from "./compile";
+import { setupMcpIpc } from "./mcp";
 
 export const setupIpcHandlers = () => {
     setupProjectIpc();
@@ -13,5 +13,6 @@ export const setupIpcHandlers = () => {
     setupAudioIpc();
     setupSystemIpc();
     setupHardwareIpc();
-    setupCompileIpc();
+    setupMcpIpc();
 };
+

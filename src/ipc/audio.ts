@@ -151,7 +151,7 @@ export const setupAudioIpc = () => {
                 }
 
                 const results = await generateAllAudio(
-                    entries.map((e) => ({ index: e.index, text: e.text })),
+                    entries,
                     lang,
                     outputDir,
                     (p) => {
@@ -237,7 +237,7 @@ export const setupAudioIpc = () => {
                 const fileName = `${String(targetIndex).padStart(4, '0')}.mp3`;
                 const outputPath = path.join(outputDir, fileName);
 
-                const success = await generateAudioSegment(entry.text, VOICE_MAP[lang].voice, outputPath);
+                const success = await generateAudioSegment(entry.text, VOICE_MAP[lang].voice, outputPath, entry);
 
                 if (success) {
                     event.sender.send("audio-generate-progress", {

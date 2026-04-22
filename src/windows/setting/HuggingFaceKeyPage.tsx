@@ -2,9 +2,9 @@ import { Spinner } from '@/components/ui/spinner';
 import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Eye, EyeOff, Check,  ExternalLink } from "lucide-react";
+import { Eye, EyeOff, Check, ExternalLink } from "lucide-react";
 
-export const AssemblyaiKeyPage = () => {
+export const HuggingFaceKeyPage = () => {
     const [apiKey, setApiKey] = useState("");
     const [showKey, setShowKey] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -15,13 +15,13 @@ export const AssemblyaiKeyPage = () => {
     }, []);
 
     const loadKey = async () => {
-        const key = await window.api.getApiKey("assemblyai");
+        const key = await window.api.getApiKey("huggingface");
         setApiKey(key || "");
     };
 
     const handleSave = async () => {
         setSaving(true);
-        const success = await window.api.setApiKey("assemblyai", apiKey);
+        const success = await window.api.setApiKey("huggingface", apiKey);
         setSaving(false);
 
         if (success) {
@@ -33,19 +33,19 @@ export const AssemblyaiKeyPage = () => {
     return (
         <div className="space-y-6">
             <div>
-                <h2 className="text-lg font-semibold">AssemblyAI API Key</h2>
+                <h2 className="text-lg font-semibold">Hugging Face Token</h2>
                 <p className="text-sm text-muted-foreground mt-1">
-                    API key của AssemblyAI dùng cho nhận dạng giọng nói qua cloud (chưa được hỗ trợ).
+                    Hugging Face Token được sử dụng cho tính năng Voice Activity Detection (VAD) cao cấp của WhisperX.
                 </p>
             </div>
 
             <div className="space-y-3">
-                <label className="text-sm font-medium">API Key</label>
+                <label className="text-sm font-medium">Access Token</label>
                 <div className="flex gap-2">
                     <div className="relative flex-1">
                         <Input
                             type={showKey ? "text" : "password"}
-                            placeholder="xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                            placeholder="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
                             value={apiKey}
                             onChange={(e) => setApiKey(e.target.value)}
                             className="pr-10 font-mono text-sm"
@@ -83,21 +83,21 @@ export const AssemblyaiKeyPage = () => {
 
             <div className="rounded-lg border border-dashed p-4 space-y-2">
                 <p className="text-xs text-muted-foreground">
-                    <strong>Lưu ý:</strong> AssemblyAI hiện chưa được hỗ trợ. Tính năng này sẽ được thêm trong các bản cập nhật tiếp theo.
-                    Bạn có thể nhập sẵn API key để sử dụng khi tính năng được triển khai.
+                    <strong>Hướng dẫn:</strong> Truy cập trang web Hugging Face để tạo Access Token (loại Read).
+                    Bạn cũng cần vào trang <strong>pyannote/segmentation-3.0</strong> trên Hugging Face để xin cấp quyền truy cập mô hình này.
                 </p>
                 <a
-                    href="https://www.assemblyai.com/app"
+                    href="https://huggingface.co/settings/tokens"
                     target="_blank"
                     rel="noopener noreferrer"
                     className="inline-flex items-center gap-1.5 text-xs text-primary hover:underline"
                     onClick={(e) => {
                         e.preventDefault();
-                        window.open("https://www.assemblyai.com/app", "_blank");
+                        window.open("https://huggingface.co/settings/tokens", "_blank");
                     }}
                 >
                     <ExternalLink className="w-3.5 h-3.5" />
-                    Lấy API Key tại assemblyai.com
+                    Lấy Token tại huggingface.co
                 </a>
             </div>
         </div>
