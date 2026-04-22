@@ -146,10 +146,22 @@ export const createFinalVideo = async (
         }
 
         const tempDir = path.join(projectPath, 'temp_final');
-        tempManager.register(tempDir);
         
-        if (fs.existsSync(tempDir)) fs.rmSync(tempDir, { recursive: true, force: true });
+        // Clean up existing temp directory
+        if (fs.existsSync(tempDir)) {
+            try {
+                fs.rmSync(tempDir, { recursive: true, force: true });
+            } catch (err) {
+                console.warn('[FinalVideoService] Failed to remove existing temp dir:', err);
+            }
+        }
+        
+        // Wait a bit for Windows to release file locks
+        await new Promise(resolve => setTimeout(resolve, 100));
+        
+        // Create fresh temp directory
         fs.mkdirSync(tempDir, { recursive: true });
+        tempManager.register(tempDir);
 
         // 2. Build segment map
         onProgress({ status: 'preparing', progress: 10, detail: 'Đang phân tích phân đoạn...' });
