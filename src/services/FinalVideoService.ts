@@ -738,299 +738,161 @@ export const createFinalVideo = async (
         const outputPath = path.join(outputDir, 'final_video.mp4');
         const fps = await getVideoFps(originalVideo);
         
-        // FIX BUG #3: Batch processing for large number of segments
-        const BATCH_SIZE = 10; // Reduced from 30 to 10 for better stability and compatibility
-        const needsBatching = segments.length > BATCH_SIZE;
-        let encodeRes = false;
+        // NEW APPROACH: Segment-by-segment encoding
+        // Each segment is encoded individually, then concatenated
+        // This avoids filter_complex issues and enables GPU acceleration
+        console.log(`[SegmentEncode] Processing ${segments.length} segments individually...`);
+        onProgress({ status: 'rerendering', progress: 60, detail: `Đang xử lý ${segments.length} đoạn video...` });
         
-        if (needsBatching) {
-            console.log(`[Batch] Processing ${segments.length} segments in batches of ${BATCH_SIZE}`);
-            onProgress({ status: 'rerendering', progress: 60, detail: `Đang xử lý ${segments.length} đoạn video theo lô (${BATCH_SIZE} đoạn/lô)...` });
+        const segmentVideos: string[] = [];
+        const CONCURRENCY = 4; // Process 4 segments in parallel
+        const limit = pLimit(CONCURRENCY);
+        
+        // Function to encode a single segment
+        const encodeSegment = async (seg: Segment, index: number): Promise<string | null> => {
+            const segmentPath = path.join(tempDir, `segment_${String(index).padStart(4, '0')}.mp4`);
             
-            const batchVideos: string[] = [];
-            const numBatches = Math.ceil(segments.length / BATCH_SIZE);
+            // Use -ss BEFORE -i for accurate seeking (keyframe-aware)
+            const args = [
+                '-y',
+                '-ss', seg.videoStart.toFixed(4),  // Seek BEFORE input
+                '-i', originalVideo,
+                '-t', seg.videoDuration.toFixed(4)  // Duration to extract
+            ];
             
-            for (let batchIdx = 0; batchIdx < numBatches; batchIdx++) {
-                const batchStart = batchIdx * BATCH_SIZE;
-                const batchEnd = Math.min(batchStart + BATCH_SIZE, segments.length);
-                const batchSegments = segments.slice(batchStart, batchEnd);
+            // Add speed filter if needed
+            if (Math.abs(seg.videoSpeed - 1.0) > 0.001) {
+                const ptsMultiplier = (1.0 / seg.videoSpeed).toFixed(4);
+                args.push('-filter:v', `setpts=${ptsMultiplier}*PTS`);
+                console.log(`[Segment ${index}] videoSpeed=${seg.videoSpeed.toFixed(4)}, setpts=${ptsMultiplier}*PTS`);
+            } else {
+                console.log(`[Segment ${index}] No speed adjustment (videoSpeed=1.0)`);
+            }
+            
+            // Try GPU encoder first
+            args.push(...HW_VIDEO_ARGS);
+            args.push('-r', fps.toFixed(3));
+            args.push('-an', segmentPath);
+            
+            let res = await runFfmpeg(args);
+            
+            // Fallback to CPU if GPU fails
+            if (!res.success || !fs.existsSync(segmentPath) || fs.statSync(segmentPath).size < 1000) {
+                console.warn(`[Segment ${index}] GPU encoding failed, trying CPU...`);
                 
-                console.log(`[Batch] Processing batch ${batchIdx + 1}/${numBatches} (segments ${batchStart}-${batchEnd - 1})`);
-                
-                const batchFilterChunks: string[] = [];
-                const batchConcatInputs: string[] = [];
-                
-                batchSegments.forEach((seg, localIdx) => {
-                    const globalIdx = batchStart + localIdx;
-                    const vLabel = `v${localIdx}`;
-                    const start = seg.videoStart.toFixed(4);
-                    const end = seg.videoEnd.toFixed(4);
-                    
-                    // FIX FROZEN FRAMES: Use SELECT filter instead of TRIM
-                    // SELECT works at frame-level (more accurate than TRIM which is stream-level)
-                    let filterStr = `[0:v]select='between(t,${start},${end})'`;
-                    
-                    if (seg.targetDuration < 0.001) {
-                        console.error(`[Video] Segment ${globalIdx}: Invalid targetDuration ${seg.targetDuration}, skipping speed adjustment`);
-                        filterStr += `,setpts=PTS-STARTPTS,fps=${fps.toFixed(3)}[${vLabel}]`;
-                        batchFilterChunks.push(filterStr);
-                        batchConcatInputs.push(`[${vLabel}]`);
-                        return;
-                    }
-                    
-                    // Use ONLY seg.videoSpeed (no adjustedSpeed)
-                    const totalVideoSpeed = seg.videoSpeed;
-                    
-                    // CRITICAL FIX: Combine PTS reset and speed adjustment in ONE setpts
-                    if (Math.abs(totalVideoSpeed - 1.0) > 0.001) {
-                        const ptsMultiplier = (1.0 / totalVideoSpeed).toFixed(4);
-                        // Apply speed to (PTS-STARTPTS), not to PTS directly
-                        filterStr += `,setpts=${ptsMultiplier}*(PTS-STARTPTS)`;
-                        console.log(`[VideoFilter] Batch segment ${globalIdx}: videoSpeed=${totalVideoSpeed.toFixed(4)}, setpts=${ptsMultiplier}*(PTS-STARTPTS)`);
-                    } else {
-                        // No speed adjustment, just reset PTS
-                        filterStr += `,setpts=PTS-STARTPTS`;
-                    }
-                    
-                    filterStr += `,fps=${fps.toFixed(3)}[${vLabel}]`;
-                    batchFilterChunks.push(filterStr);
-                    batchConcatInputs.push(`[${vLabel}]`);
-                });
-                
-                batchFilterChunks.push(`${batchConcatInputs.join('')}concat=n=${batchSegments.length}:v=1:a=0,format=yuv420p[outv]`);
-                
-                const batchFilterScriptPath = path.join(tempDir, `video_filter_batch_${batchIdx}.txt`);
-                fs.writeFileSync(batchFilterScriptPath, batchFilterChunks.join(';\n'), 'utf-8');
-                
-                const batchOutputPath = path.join(tempDir, `batch_video_${String(batchIdx).padStart(3, '0')}.mp4`);
-                
-                // FIX: Use CPU encoder for batch processing (more compatible with filter_complex)
-                // Hardware encoders may have issues with complex filter graphs
-                const batchEncodeArgs = [
+                // Retry with CPU encoder
+                const cpuArgs = [
                     '-y',
+                    '-ss', seg.videoStart.toFixed(4),
                     '-i', originalVideo,
-                    '-filter_complex_script', batchFilterScriptPath,
-                    '-map', '[outv]',
-                    '-c:v', 'libx264',
-                    '-crf', '18',
-                    '-preset', 'ultrafast',
-                    '-r', fps.toFixed(3),
-                    '-an',
-                    batchOutputPath
+                    '-t', seg.videoDuration.toFixed(4)
                 ];
                 
-                console.log(`[Batch] Encoding batch ${batchIdx + 1}/${numBatches} with CPU (libx264)...`);
-                const batchRes = await runFfmpeg(batchEncodeArgs);
-                
-                if (!batchRes.success) {
-                    console.error(`[Batch] Encoding failed for batch ${batchIdx + 1}/${numBatches}`);
-                    console.error(`[Batch] FFmpeg stderr:`, batchRes.stderr.substring(0, 500));
-                    onProgress({ status: 'error', progress: 0, detail: `Lỗi encode batch ${batchIdx + 1}` });
-                    return null;
+                if (Math.abs(seg.videoSpeed - 1.0) > 0.001) {
+                    const ptsMultiplier = (1.0 / seg.videoSpeed).toFixed(4);
+                    cpuArgs.push('-filter:v', `setpts=${ptsMultiplier}*PTS`);
                 }
                 
-                if (!fs.existsSync(batchOutputPath)) {
-                    console.error(`[Batch] Output file not created for batch ${batchIdx + 1}`);
-                    onProgress({ status: 'error', progress: 0, detail: `File batch ${batchIdx + 1} không được tạo` });
-                    return null;
-                }
+                cpuArgs.push('-c:v', 'libx264', '-crf', '18', '-preset', 'ultrafast');
+                cpuArgs.push('-r', fps.toFixed(3));
+                cpuArgs.push('-an', segmentPath);
                 
-                const batchSize = fs.statSync(batchOutputPath).size;
-                if (batchSize < 1000) {
-                    console.error(`[Batch] Batch ${batchIdx + 1} file too small: ${batchSize} bytes`);
-                    console.error(`[Batch] FFmpeg stderr:`, batchRes.stderr.substring(0, 500));
-                    onProgress({ status: 'error', progress: 0, detail: `Batch ${batchIdx + 1} encoding failed (${batchSize} bytes)` });
-                    return null;
-                }
-                
-                console.log(`[Batch] Batch ${batchIdx + 1} encoded successfully: ${(batchSize / 1024 / 1024).toFixed(2)}MB`);
-                
-                batchVideos.push(batchOutputPath);
-                
-                const batchProgress = 60 + Math.round((batchIdx + 1) / numBatches * 25);
-                onProgress({ status: 'rerendering', progress: batchProgress, detail: `Đã xử lý lô ${batchIdx + 1}/${numBatches}...` });
+                res = await runFfmpeg(cpuArgs);
             }
             
-            // Merge all batch videos
-            console.log(`[Batch] Merging ${batchVideos.length} batch videos...`);
-            onProgress({ status: 'rerendering', progress: 85, detail: 'Đang gộp các lô video...' });
-            
-            const batchListPath = path.join(tempDir, 'batch_concat_list.txt');
-            const batchListContent = batchVideos.map(p => `file '${p.replace(/\\/g, '/')}'`).join('\n');
-            fs.writeFileSync(batchListPath, batchListContent, 'utf-8');
-            
-            const mergedVideoPath = path.join(tempDir, 'merged_video.mp4');
-            const mergeRes = await runFfmpeg([
-                '-y', '-f', 'concat', '-safe', '0', '-i', batchListPath,
-                '-c:v', 'copy',
-                mergedVideoPath
-            ]);
-            
-            if (!mergeRes.success || !fs.existsSync(mergedVideoPath)) {
-                onProgress({ status: 'error', progress: 0, detail: 'Lỗi khi gộp các lô video!' });
+            if (!res.success || !fs.existsSync(segmentPath)) {
+                console.error(`[Segment ${index}] Encoding failed`);
                 return null;
             }
             
-            // Final mux with audio
-            console.log(`[Batch] Adding audio to merged video...`);
-            onProgress({ status: 'rerendering', progress: 90, detail: 'Đang thêm âm thanh vào video...' });
-            
-            const finalMuxRes = await runFfmpeg([
-                '-y',
-                '-i', mergedVideoPath,
-                '-i', finalAudioWav,
-                '-c:v', 'copy',
-                '-c:a', 'aac', '-b:a', '192k',
-                '-map', '0:v:0',
-                '-map', '1:a:0',
-                outputPath
-            ]);
-            
-            if (!finalMuxRes.success || !fs.existsSync(outputPath)) {
-                onProgress({ status: 'error', progress: 0, detail: 'Lỗi khi thêm âm thanh vào video!' });
+            const segSize = fs.statSync(segmentPath).size;
+            if (segSize < 1000) {
+                console.error(`[Segment ${index}] File too small: ${segSize} bytes`);
                 return null;
             }
             
-            encodeRes = true;
-            
-        } else {
-            // Original single-pass encoding for small number of segments
-            const filterChunks: string[] = [];
-            const concatInputs: string[] = [];
-            
-            segments.forEach((seg, i) => {
-                const vLabel = `v${i}`;
-                const start = seg.videoStart.toFixed(4);
-                const end = seg.videoEnd.toFixed(4);
-                const speed = seg.videoSpeed;
-                
-                // FIX FROZEN FRAMES: Use SELECT filter instead of TRIM
-                // SELECT works at frame-level (more accurate than TRIM which is stream-level)
-                let filterStr = `[0:v]select='between(t,${start},${end})'`;
-                
-                if (seg.targetDuration < 0.001) {
-                    console.error(`[Video] Segment ${i}: Invalid targetDuration ${seg.targetDuration}, skipping speed adjustment`);
-                    filterStr += `,setpts=PTS-STARTPTS,fps=${fps.toFixed(3)}[${vLabel}]`;
-                    filterChunks.push(filterStr);
-                    concatInputs.push(`[${vLabel}]`);
-                    return;
-                }
-                
-                // Use ONLY seg.videoSpeed (no adjustedSpeed)
-                const totalVideoSpeed = seg.videoSpeed;
-                
-                // CRITICAL FIX: Combine PTS reset and speed adjustment in ONE setpts
-                if (Math.abs(totalVideoSpeed - 1.0) > 0.001) {
-                    const ptsMultiplier = (1.0 / totalVideoSpeed).toFixed(4);
-                    // Apply speed to (PTS-STARTPTS), not to PTS directly
-                    filterStr += `,setpts=${ptsMultiplier}*(PTS-STARTPTS)`;
-                    console.log(`[Video] Segment ${i} [${seg.type}]: videoSpeed=${totalVideoSpeed.toFixed(4)}, setpts=${ptsMultiplier}*(PTS-STARTPTS)`);
-                } else {
-                    // No speed adjustment, just reset PTS
-                    filterStr += `,setpts=PTS-STARTPTS`;
-                    console.log(`[Video] Segment ${i} [${seg.type}]: NO speed change (videoSpeed=1.0)`);
-                }
-                
-                filterStr += `,fps=${fps.toFixed(3)}[${vLabel}]`;
-                filterChunks.push(filterStr);
-                concatInputs.push(`[${vLabel}]`);
-            });
-            
-            filterChunks.push(`${concatInputs.join('')}concat=n=${segments.length}:v=1:a=0,format=yuv420p[outv]`);
-            
-            const filterScriptPath = path.join(tempDir, 'video_filter.txt');
-            fs.writeFileSync(filterScriptPath, filterChunks.join(';\n'), 'utf-8');
-
-            const totalTargetDuration = segments.reduce((sum, s) => sum + s.targetDuration, 0);
-
-            // FIX: Hardware encoder with fallback to CPU
-            let encodeRes = false;
-            let hwEncoderUsed = true;
-            
-            const tryEncode = async (videoArgs: string[], encoderName: string): Promise<boolean> => {
-                return new Promise<boolean>((resolve) => {
-                    const ffmpeg = getFfmpegPath();
-                    const args = [
-                        '-y',
-                        '-i', originalVideo,
-                        '-i', finalAudioWav,
-                        '-filter_complex_script', filterScriptPath,
-                        '-map', '[outv]',
-                        '-map', '1:a:0',
-                        ...videoArgs,
-                        '-r', fps.toFixed(3),
-                        '-c:a', 'aac', '-b:a', '192k',
-                        '-vsync', '1', 
-                        outputPath
-                    ];
-
-                    console.log(`[Encoder] Trying ${encoderName}...`);
-                    const proc = spawn(ffmpeg, args, { windowsHide: true });
-                    activeProcesses.push(proc);
-                    
-                    proc.stderr.on('data', (data) => {
-                        const out = data.toString();
-                        const match = out.match(/time=\s*(\d+):(\d+):(\d+)\.\d+/);
-                        if (match) {
-                            const h = parseInt(match[1]), m = parseInt(match[2]), s = parseInt(match[3]);
-                            const currDur = h * 3600 + m * 60 + s;
-                            const pct = Math.min(60 + Math.round((currDur / totalActual) * 35), 95);
-                            onProgress({ status: 'rerendering', progress: pct, detail: `Đang render video (${encoderName}): ${currDur}s / ${Math.round(totalActual)}s...` });
-                        }
-                    });
-
-                    proc.on('close', (code) => {
-                        activeProcesses = activeProcesses.filter(p => p !== proc);
-                        resolve(code === 0);
-                    });
-                    
-                    proc.on('error', (err) => {
-                        activeProcesses = activeProcesses.filter(p => p !== proc);
-                        console.error(`[Encoder] ${encoderName} error:`, err);
-                        resolve(false);
-                    });
-                });
-            };
-            
-            // Try hardware encoder first
-            try {
-                encodeRes = await tryEncode(HW_VIDEO_ARGS, hwInfo.hasAmdGpu ? 'AMD AMF' : (hwInfo.hasNvidiaGpu ? 'NVIDIA NVENC' : 'CPU'));
-                
-                if (!encodeRes) {
-                    console.warn('[Encoder] Hardware encoder failed, falling back to CPU...');
-                    hwEncoderUsed = false;
-                    
-                    // Fallback to CPU encoder
-                    const CPU_ARGS = ['-c:v', 'libx264', '-crf', '22', '-preset', 'medium'];
-                    encodeRes = await tryEncode(CPU_ARGS, 'CPU (libx264)');
-                }
-            } catch (err) {
-                console.error('[Encoder] Encoding failed:', err);
-                encodeRes = false;
-            }
-            
-            if (hwEncoderUsed && encodeRes) {
-                console.log('[Encoder] Successfully encoded with hardware acceleration');
-            } else if (encodeRes) {
-                console.log('[Encoder] Successfully encoded with CPU (hardware encoder failed)');
-            }
-        }
-
-        // FIX BUG #4: Cleanup temp directory (including batch files)
-        // DISABLED FOR DEBUGGING - Keep batch files to analyze
-        // if (needsBatching) {
-        //     console.log('[Cleanup] Removing batch video files...');
-        //     const batchFiles = fs.readdirSync(tempDir).filter(f => f.startsWith('batch_video_') || f.startsWith('video_filter_batch_'));
-        //     for (const file of batchFiles) {
-        //         try {
-        //             fs.unlinkSync(path.join(tempDir, file));
-        //         } catch (e) {
-        //             console.warn(`[Cleanup] Failed to remove ${file}:`, e);
-        //         }
-        //     }
-        // }
+            console.log(`[Segment ${index}] Encoded: ${(segSize / 1024).toFixed(1)}KB`);
+            return segmentPath;
+        };
         
-        console.log('[Debug] Batch files kept for analysis in temp_final/');
+        // Encode all segments in parallel
+        const encodePromises = segments.map((seg, i) => 
+            limit(async () => {
+                const result = await encodeSegment(seg, i);
+                const progress = 60 + Math.round(((i + 1) / segments.length) * 25);
+                onProgress({ status: 'rerendering', progress, detail: `Đã xử lý ${i + 1}/${segments.length} đoạn...` });
+                return result;
+            })
+        );
+        
+        const encodedSegments = await Promise.all(encodePromises);
+        
+        // Check if all segments encoded successfully
+        const failedSegments = encodedSegments.filter(s => s === null);
+        if (failedSegments.length > 0) {
+            console.error(`[SegmentEncode] ${failedSegments.length} segments failed to encode`);
+            onProgress({ status: 'error', progress: 0, detail: `${failedSegments.length} đoạn video không encode được!` });
+            return null;
+        }
+        
+        segmentVideos.push(...encodedSegments.filter(s => s !== null) as string[]);
+        
+        // Concatenate all segments
+        console.log(`[Concat] Merging ${segmentVideos.length} segments...`);
+        onProgress({ status: 'rerendering', progress: 85, detail: 'Đang gộp các đoạn video...' });
+        
+        const concatListPath = path.join(tempDir, 'segment_concat_list.txt');
+        const concatListContent = segmentVideos.map(p => `file '${p.replace(/\\/g, '/')}'`).join('\n');
+        fs.writeFileSync(concatListPath, concatListContent, 'utf-8');
+        
+        const mergedVideoPath = path.join(tempDir, 'merged_video.mp4');
+        const mergeRes = await runFfmpeg([
+            '-y', '-f', 'concat', '-safe', '0', '-i', concatListPath,
+            '-c:v', 'copy',  // No re-encoding
+            mergedVideoPath
+        ]);
+        
+        if (!mergeRes.success || !fs.existsSync(mergedVideoPath)) {
+            onProgress({ status: 'error', progress: 0, detail: 'Lỗi khi gộp các đoạn video!' });
+            return null;
+        }
+        
+        // Final mux with audio
+        console.log(`[Mux] Adding audio to merged video...`);
+        onProgress({ status: 'rerendering', progress: 90, detail: 'Đang thêm âm thanh vào video...' });
+        
+        const finalMuxRes = await runFfmpeg([
+            '-y',
+            '-i', mergedVideoPath,
+            '-i', finalAudioWav,
+            '-c:v', 'copy',
+            '-c:a', 'aac', '-b:a', '192k',
+            '-map', '0:v:0',
+            '-map', '1:a:0',
+            outputPath
+        ]);
+        
+        if (!finalMuxRes.success || !fs.existsSync(outputPath)) {
+            onProgress({ status: 'error', progress: 0, detail: 'Lỗi khi thêm âm thanh vào video!' });
+            return null;
+        }
+        
+        const encodeRes = true;
+
+        // Cleanup temp segment files
+        console.log('[Cleanup] Cleaning up temporary segment files...');
+        try {
+            const segmentFiles = fs.readdirSync(tempDir).filter(f => f.startsWith('segment_'));
+            for (const file of segmentFiles) {
+                try {
+                    fs.unlinkSync(path.join(tempDir, file));
+                } catch (e) {
+                    console.warn(`[Cleanup] Failed to remove ${file}:`, e);
+                }
+            }
+        } catch (e) {
+            console.warn('[Cleanup] Failed to cleanup segment files:', e);
+        }
         
         tempManager.unregister(tempDir);
         await tempManager.cleanup();
