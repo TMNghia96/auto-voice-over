@@ -748,8 +748,7 @@ export const createFinalVideo = async (
         const VIDEO_CONCURRENCY = 1; // Process segments sequentially for now (debug)
         const videoLimit = pLimit(VIDEO_CONCURRENCY);
         
-        // Get video duration for validation
-        const videoDuration = await getMediaDuration(originalVideo);
+        // videoDuration already declared at line 412
         console.log(`[Video] Original video duration: ${videoDuration.toFixed(2)}s`);
         console.log(`[Video] Total segments: ${segments.length}`);
         
