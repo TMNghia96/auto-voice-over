@@ -745,18 +745,19 @@ export const createFinalVideo = async (
         onProgress({ status: 'rerendering', progress: 60, detail: `Đang xử lý ${segments.length} đoạn video...` });
         
         const segmentVideos: string[] = [];
-        const VIDEO_CONCURRENCY = 4; // Process 4 segments in parallel
+        const VIDEO_CONCURRENCY = 1; // Process segments sequentially for now (debug)
         const videoLimit = pLimit(VIDEO_CONCURRENCY);
         
         // Function to encode a single segment
         const encodeSegment = async (seg: Segment, index: number): Promise<string | null> => {
             const segmentPath = path.join(tempDir, `segment_${String(index).padStart(4, '0')}.mp4`);
             
-            // Use -ss BEFORE -i for accurate seeking (keyframe-aware)
+            // CRITICAL: Use -i BEFORE -ss for better compatibility
+            // Then use trim filter for exact extraction
             const args = [
                 '-y',
-                '-ss', seg.videoStart.toFixed(4),  // Seek BEFORE input
                 '-i', originalVideo,
+                '-ss', seg.videoStart.toFixed(4),  // Seek AFTER input
                 '-t', seg.videoDuration.toFixed(4)  // Duration to extract
             ];
             
@@ -769,49 +770,33 @@ export const createFinalVideo = async (
                 console.log(`[Segment ${index}] No speed adjustment (videoSpeed=1.0)`);
             }
             
-            // Try GPU encoder first
-            args.push(...HW_VIDEO_ARGS);
+            // Use CPU encoder for reliability (GPU has issues with many parallel encodes)
+            args.push('-c:v', 'libx264', '-crf', '18', '-preset', 'ultrafast');
             args.push('-r', fps.toFixed(3));
             args.push('-an', segmentPath);
             
-            let res = await runFfmpeg(args);
+            console.log(`[Segment ${index}] Encoding from ${seg.videoStart.toFixed(2)}s, duration ${seg.videoDuration.toFixed(2)}s...`);
+            const res = await runFfmpeg(args);
             
-            // Fallback to CPU if GPU fails
-            if (!res.success || !fs.existsSync(segmentPath) || fs.statSync(segmentPath).size < 1000) {
-                console.warn(`[Segment ${index}] GPU encoding failed, trying CPU...`);
-                
-                // Retry with CPU encoder
-                const cpuArgs = [
-                    '-y',
-                    '-ss', seg.videoStart.toFixed(4),
-                    '-i', originalVideo,
-                    '-t', seg.videoDuration.toFixed(4)
-                ];
-                
-                if (Math.abs(seg.videoSpeed - 1.0) > 0.001) {
-                    const ptsMultiplier = (1.0 / seg.videoSpeed).toFixed(4);
-                    cpuArgs.push('-filter:v', `setpts=${ptsMultiplier}*PTS`);
-                }
-                
-                cpuArgs.push('-c:v', 'libx264', '-crf', '18', '-preset', 'ultrafast');
-                cpuArgs.push('-r', fps.toFixed(3));
-                cpuArgs.push('-an', segmentPath);
-                
-                res = await runFfmpeg(cpuArgs);
+            if (!res.success) {
+                console.error(`[Segment ${index}] FFmpeg failed`);
+                console.error(`[Segment ${index}] stderr:`, res.stderr.substring(0, 500));
+                return null;
             }
             
-            if (!res.success || !fs.existsSync(segmentPath)) {
-                console.error(`[Segment ${index}] Encoding failed`);
+            if (!fs.existsSync(segmentPath)) {
+                console.error(`[Segment ${index}] Output file not created`);
                 return null;
             }
             
             const segSize = fs.statSync(segmentPath).size;
             if (segSize < 1000) {
                 console.error(`[Segment ${index}] File too small: ${segSize} bytes`);
+                console.error(`[Segment ${index}] stderr:`, res.stderr.substring(0, 500));
                 return null;
             }
             
-            console.log(`[Segment ${index}] Encoded: ${(segSize / 1024).toFixed(1)}KB`);
+            console.log(`[Segment ${index}] ✓ Encoded: ${(segSize / 1024).toFixed(1)}KB`);
             return segmentPath;
         };
         
