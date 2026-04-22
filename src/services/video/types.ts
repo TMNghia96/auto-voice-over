@@ -24,7 +24,16 @@ export interface EncodeResult {
 /**
  * Segment with validated and adjusted timing parameters
  */
-export interface ValidatedSegment {
+export interface ValidatedSegment extends Segment {
+  adjustedVideoSpeed: number;
+  adjustedDuration: number;
+  needsSlowMotion: boolean;
+}
+
+/**
+ * Base segment interface from FinalVideoService
+ */
+export interface Segment {
   type: 'dubbed' | 'gap';
   index?: number;
   videoStart: number;
@@ -37,9 +46,6 @@ export interface ValidatedSegment {
   videoSpeed: number;
   fadeStart?: boolean;
   fadeEnd?: boolean;
-  adjustedVideoSpeed: number;
-  adjustedDuration: number;
-  needsSlowMotion: boolean;
 }
 
 /**

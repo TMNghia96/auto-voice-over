@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { VideoEncoder } from '../VideoEncoder';
-import { EncodeOptions, EncodeResult } from '../../types';
+import { VideoEncoder } from '../../../../src/services/video/encoders/VideoEncoder';
+import { EncodeOptions, EncodeResult } from '../../../../src/services/video/types';
 
 // Mock implementation for testing the interface
 class MockGPUEncoder implements VideoEncoder {

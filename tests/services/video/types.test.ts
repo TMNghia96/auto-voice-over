@@ -5,7 +5,7 @@ import {
   ValidatedSegment, 
   VideoProcessorConfig,
   DEFAULT_VIDEO_CONFIG 
-} from '../types';
+} from '../../../src/services/video/types';
 
 describe('Video Types', () => {
   describe('EncodeOptions', () => {
