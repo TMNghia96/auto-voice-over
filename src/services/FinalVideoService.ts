@@ -277,9 +277,15 @@ export const createFinalVideo = async (
         const outputPath = path.join(outputDir, 'final_video.mp4');
         await videoProcessor.concatenateVideo(muxedSegmentPaths, outputPath);
 
-        // Cleanup
+        // Cleanup - delay to allow Windows to release file locks
+        await new Promise(resolve => setTimeout(resolve, 500));
         tempManager.unregister(tempDir);
-        await tempManager.cleanup();
+        try {
+            await tempManager.cleanup();
+        } catch (cleanupErr) {
+            console.warn('[FinalVideoService] Cleanup warning:', cleanupErr);
+            // Don't fail the render if cleanup fails
+        }
 
         const totalTime = Math.round((Date.now() - startTime) / 1000);
         onProgress({ status: 'done', progress: 100, detail: `Hoàn tất! Render mất ${totalTime}s.` });
@@ -289,7 +295,11 @@ export const createFinalVideo = async (
     } catch (err: any) {
         const tempDir = path.join(projectPath, 'temp_final');
         tempManager.unregister(tempDir);
-        await tempManager.cleanup();
+        try {
+            await tempManager.cleanup();
+        } catch (cleanupErr) {
+            console.warn('[FinalVideoService] Error cleanup warning:', cleanupErr);
+        }
         
         if (err.message === "Cancelled by user") {
             onProgress({ status: 'error', progress: 0, detail: `Đã huỷ xuất video!` });
