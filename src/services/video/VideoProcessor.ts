@@ -43,8 +43,10 @@ export class VideoProcessor {
       return [];
     }
 
-    // Create encoder
+    // Create encoder - force GPU if preference is set
     const encoder = await this.encoderFactory.createEncoder();
+    
+    console.log(`[VideoProcessor] Using ${encoder.type.toUpperCase()} encoder: ${encoder.name}`);
     
     // Determine concurrency based on encoder type
     const concurrency = encoder.type === 'gpu' ? 6 : 2;
@@ -95,7 +97,7 @@ export class VideoProcessor {
   }
 
   /**
-   * Encode a segment with retry logic and GPU->CPU fallback
+   * Encode a segment with retry logic (NO GPU->CPU fallback if GPU is forced)
    */
   private async encodeSegmentWithRetry(
     encoder: VideoEncoder,
@@ -146,8 +148,8 @@ export class VideoProcessor {
           lastError.message
         );
 
-        // On first failure with GPU, try CPU fallback
-        if (attempt === 1 && currentEncoder.type === 'gpu') {
+        // Only fallback to CPU if preference is 'auto'
+        if (attempt === 1 && currentEncoder.type === 'gpu' && this.config.encoderPreference === 'auto') {
           console.log(`Segment ${index}: Falling back to CPU encoder`);
           const cpuFactory = new EncoderFactory('cpu');
           currentEncoder = await cpuFactory.createEncoder();
@@ -169,10 +171,12 @@ export class VideoProcessor {
 
   /**
    * Concatenate video segments using FFmpeg concat demuxer
+   * Uses copy mode for already-muxed segments (fast)
    */
   async concatenateVideo(
     segmentPaths: string[],
-    outputPath: string
+    outputPath: string,
+    useCopy: boolean = true
   ): Promise<boolean> {
     if (segmentPaths.length === 0) {
       throw new Error('No segment paths provided for concatenation');
@@ -194,16 +198,43 @@ export class VideoProcessor {
 
     await fs.writeFile(concatListPath, concatContent, 'utf-8');
 
+    console.log(`[Concat] Concatenating ${segmentPaths.length} segments with ${useCopy ? 'copy' : 're-encode'} mode`);
+
     // Run FFmpeg concat
     try {
-      await execFileAsync('ffmpeg', [
-        '-f', 'concat',
-        '-safe', '0',
-        '-i', concatListPath,
-        '-c', 'copy',
-        '-y',
-        outputPath,
-      ]);
+      if (useCopy) {
+        // Fast copy mode - no re-encoding
+        await execFileAsync('ffmpeg', [
+          '-f', 'concat',
+          '-safe', '0',
+          '-i', concatListPath,
+          '-c', 'copy',
+          '-y',
+          outputPath,
+        ]);
+      } else {
+        // Re-encode mode (for segments without audio or mismatched formats)
+        const encoder = await this.encoderFactory.createEncoder();
+        const useGPU = encoder.type === 'gpu';
+        
+        console.log(`[Concat] Using ${useGPU ? 'GPU' : 'CPU'} encoder for re-encoding`);
+
+        const videoArgs = useGPU
+          ? ['-c:v', encoder.name, '-quality', 'balanced', '-rc', 'cqp', '-qp_i', '18', '-qp_p', '18']
+          : ['-c:v', 'libx264', '-preset', 'fast', '-crf', '18'];
+
+        await execFileAsync('ffmpeg', [
+          '-f', 'concat',
+          '-safe', '0',
+          '-i', concatListPath,
+          ...videoArgs,
+          '-r', '30',
+          '-vsync', 'cfr',
+          '-c:a', 'copy',
+          '-y',
+          outputPath,
+        ]);
+      }
 
       // Clean up concat list
       await fs.unlink(concatListPath).catch(() => {});
@@ -212,6 +243,95 @@ export class VideoProcessor {
     } catch (error) {
       throw new Error(`Failed to concatenate video: ${(error as Error).message}`);
     }
+  }
+
+  /**
+   * Mux each video segment with its corresponding audio segment
+   * This ensures perfect sync by muxing before concatenation
+   */
+  async muxSegmentsWithAudio(
+    videoSegmentPaths: string[],
+    audioSegmentPaths: string[],
+    tempDir: string,
+    onProgress: (progress: number) => void
+  ): Promise<string[]> {
+    if (videoSegmentPaths.length !== audioSegmentPaths.length) {
+      throw new Error(`Segment count mismatch: ${videoSegmentPaths.length} video vs ${audioSegmentPaths.length} audio`);
+    }
+
+    const limit = pLimit(4); // Mux 4 segments at a time
+    const muxedPaths: string[] = [];
+    let completed = 0;
+
+    const muxPromises = videoSegmentPaths.map((videoPath, index) =>
+      limit(async () => {
+        const audioPath = audioSegmentPaths[index];
+        const muxedPath = path.join(tempDir, `muxed_${index}.mp4`);
+
+        await this.muxSegmentWithRetry(
+          videoPath,
+          audioPath,
+          muxedPath,
+          index,
+          this.config.maxRetries
+        );
+
+        completed++;
+        onProgress(completed / videoSegmentPaths.length);
+
+        return muxedPath;
+      })
+    );
+
+    const results = await Promise.all(muxPromises);
+    return results;
+  }
+
+  /**
+   * Mux a single segment with retry logic
+   */
+  private async muxSegmentWithRetry(
+    videoPath: string,
+    audioPath: string,
+    outputPath: string,
+    index: number,
+    maxRetries: number = 3
+  ): Promise<void> {
+    let lastError: Error | null = null;
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        await execFileAsync('ffmpeg', [
+          '-i', videoPath,
+          '-i', audioPath,
+          '-c:v', 'copy',
+          '-c:a', 'aac',
+          '-b:a', '192k',
+          '-map', '0:v:0',
+          '-map', '1:a:0',
+          '-shortest',
+          '-y',
+          outputPath,
+        ]);
+
+        return; // Success
+      } catch (error) {
+        lastError = error as Error;
+        console.warn(
+          `Segment ${index} mux attempt ${attempt}/${maxRetries} failed:`,
+          lastError.message
+        );
+
+        if (attempt < maxRetries) {
+          const delay = this.config.retryDelay * Math.pow(2, attempt - 1);
+          await this.sleep(delay);
+        }
+      }
+    }
+
+    throw new Error(
+      `Failed to mux segment ${index} after ${maxRetries} attempts: ${lastError?.message}`
+    );
   }
 
   /**
@@ -230,7 +350,7 @@ export class VideoProcessor {
       throw new Error(`Input file not found: ${(error as Error).message}`);
     }
 
-    // Run FFmpeg mux
+    // Run FFmpeg mux with proper sync flags
     try {
       await execFileAsync('ffmpeg', [
         '-i', videoPath,
@@ -238,7 +358,10 @@ export class VideoProcessor {
         '-c:v', 'copy',
         '-c:a', 'aac',
         '-b:a', '192k',
-        '-shortest',
+        '-map', '0:v:0',      // Map video from first input
+        '-map', '1:a:0',      // Map audio from second input
+        '-async', '1',        // Audio sync method
+        '-vsync', 'cfr',      // Constant frame rate
         '-y',
         outputPath,
       ]);
