@@ -37,7 +37,6 @@ export interface FinalVideoProgress {
 
 export interface FinalVideoConfig {
     duckVolume?: number;
-    fadeDuration?: number;
     encoderPreference?: 'gpu' | 'cpu' | 'auto';
 }
 
@@ -116,7 +115,6 @@ export const createFinalVideo = async (
     projectPath: string,
     onProgress: (p: FinalVideoProgress) => void,
     duckVolume: number = 0.15,
-    fadeDuration: number = 0.5,
     config?: FinalVideoConfig
 ): Promise<string | null> => {
     try {
@@ -127,8 +125,7 @@ export const createFinalVideo = async (
         // Merge config with defaults
         const finalConfig: FinalVideoConfig = {
             duckVolume,
-            fadeDuration,
-            encoderPreference: 'auto',
+            encoderPreference: 'gpu',
             ...config
         };
 
@@ -202,7 +199,7 @@ export const createFinalVideo = async (
         onProgress({ status: 'processing', progress: 20, detail: 'Đang xử lý âm thanh...' });
         
         const ffmpegPath = getFfmpegPath();
-        const audioProcessor = new AudioProcessor(ffmpegPath, finalConfig.duckVolume!, finalConfig.fadeDuration!);
+        const audioProcessor = new AudioProcessor(ffmpegPath, finalConfig.duckVolume!);
         
         const audioResult = await audioProcessor.processAudioSegments(
             segments,

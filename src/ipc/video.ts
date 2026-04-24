@@ -205,8 +205,7 @@ export const setupVideoIpc = () => {
                         }
                     }
                 }, 
-                options?.backgroundVolume ?? 0.15,
-                options?.fadeDuration ?? 0.5
+                options?.backgroundVolume ?? 0.15
             );
 		} catch (err) {
 			console.error("Create final video failed:", err);
