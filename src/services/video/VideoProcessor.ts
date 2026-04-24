@@ -203,12 +203,16 @@ export class VideoProcessor {
     // Run FFmpeg concat
     try {
       if (useCopy) {
-        // Fast copy mode - no re-encoding
+        // Fast copy mode with fps filter to ensure CFR
         await execFileAsync('ffmpeg', [
           '-f', 'concat',
           '-safe', '0',
           '-i', concatListPath,
-          '-c', 'copy',
+          '-vf', 'fps=30',
+          '-c:v', 'libx264',
+          '-preset', 'ultrafast',
+          '-crf', '18',
+          '-c:a', 'copy',
           '-y',
           outputPath,
         ]);
