@@ -110,6 +110,8 @@ const findOriginalVideo = (projectPath: string): string | null => {
     return videoFile ? path.join(videoDir, videoFile) : null;
 };
 
+// Removed AV1 transcoding - too slow, use H.264 source videos instead
+
 export const createFinalVideo = async (
     projectPath: string,
     onProgress: (p: FinalVideoProgress) => void,
@@ -216,25 +218,8 @@ export const createFinalVideo = async (
             }
         );
 
-        // 5. Concatenate audio
-        onProgress({ status: 'concatenating', progress: 55, detail: 'Đang kết dính luồng âm thanh...' });
-        
-        const finalAudioWav = await audioProcessor.concatenateAudio(
-            audioResult.segmentPaths,
-            tempDir
-        );
-
-        // Verify audio sync
-        const totalExpected = segments.reduce((sum, s) => sum + s.targetDuration, 0);
-        const totalActual = await getMediaDuration(finalAudioWav);
-        const finalDrift = totalActual - totalExpected;
-        
-        if (Math.abs(finalDrift) > 0.1) {
-            console.warn(`[Sync] Final audio drift: ${finalDrift.toFixed(3)}s (expected: ${totalExpected.toFixed(2)}s, actual: ${totalActual.toFixed(2)}s)`);
-        }
-
-        // 6. Validate segments based on ACTUAL audio durations
-        onProgress({ status: 'rerendering', progress: 60, detail: 'Đang xác thực phân đoạn...' });
+        // 5. Validate segments based on ACTUAL audio durations
+        onProgress({ status: 'rerendering', progress: 55, detail: 'Đang xác thực phân đoạn...' });
         
         const validator = new SegmentValidator();
         const validatedSegments = validator.validateAndAdjust(
@@ -243,15 +228,16 @@ export const createFinalVideo = async (
             videoDuration
         );
 
-        // 7. Process video segments
-        onProgress({ status: 'rerendering', progress: 65, detail: 'Đang xử lý video...' });
+        // 6. Process video segments with GPU
+        onProgress({ status: 'rerendering', progress: 60, detail: 'Đang xử lý video bằng GPU...' });
         
-        const encoderFactory = new EncoderFactory(finalConfig.encoderPreference || 'auto');
+        const encoderPreference = finalConfig.encoderPreference || 'gpu';
+        const encoderFactory = new EncoderFactory(encoderPreference);
         const videoProcessor = new VideoProcessor(encoderFactory, validator, {
             concurrency: 6,
             maxRetries: 3,
             retryDelay: 1000,
-            encoderPreference: finalConfig.encoderPreference || 'auto'
+            encoderPreference: encoderPreference
         });
 
         const videoSegmentPaths = await videoProcessor.processVideoSegments(
@@ -259,7 +245,7 @@ export const createFinalVideo = async (
             originalVideo,
             tempDir,
             (pct) => {
-                const progress = 65 + Math.round(pct * 20);
+                const progress = 60 + Math.round(pct * 15);
                 onProgress({
                     status: 'rerendering',
                     progress,
@@ -268,20 +254,31 @@ export const createFinalVideo = async (
             }
         );
 
-        // 8. Concatenate video
-        onProgress({ status: 'rerendering', progress: 85, detail: 'Đang gộp các đoạn video...' });
+        // 7. Mux each video segment with its audio segment
+        onProgress({ status: 'rerendering', progress: 75, detail: 'Đang đồng bộ audio với video...' });
         
-        const mergedVideo = path.join(tempDir, 'merged_video.mp4');
-        await videoProcessor.concatenateVideo(videoSegmentPaths, mergedVideo);
+        const muxedSegmentPaths = await videoProcessor.muxSegmentsWithAudio(
+            videoSegmentPaths,
+            audioResult.segmentPaths,
+            tempDir,
+            (pct) => {
+                const progress = 75 + Math.round(pct * 10);
+                onProgress({
+                    status: 'rerendering',
+                    progress,
+                    detail: `Đang đồng bộ ${Math.round(pct * 100)}%...`
+                });
+            }
+        );
 
-        // 9. Mux final video with audio
-        onProgress({ status: 'rerendering', progress: 90, detail: 'Đang thêm âm thanh vào video...' });
+        // 8. Concatenate muxed segments
+        onProgress({ status: 'rerendering', progress: 85, detail: 'Đang gộp các đoạn video...' });
         
         const outputDir = path.join(projectPath, 'final');
         if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
         const outputPath = path.join(outputDir, 'final_video.mp4');
-        await videoProcessor.muxWithAudio(mergedVideo, finalAudioWav, outputPath);
+        await videoProcessor.concatenateVideo(muxedSegmentPaths, outputPath);
 
         // Cleanup
         tempManager.unregister(tempDir);
