@@ -119,17 +119,12 @@ export const CreateFinalVideoPhase = ({ onComplete }: { onComplete?: () => void 
 
 
 	const [backgroundVolume, setBackgroundVolume] = useState(10);
-	const [fadeDuration, setFadeDuration] = useState(0.5);
 	const volumeSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-	const fadeSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
 	// Tải giá trị âm lượng mặc định từ config khi khởi tạo
 	useEffect(() => {
 		window.api.getDefaultBackgroundVolume().then((vol) => {
 			setBackgroundVolume(vol);
-		});
-		window.api.getDefaultFadeDuration().then((dur) => {
-			setFadeDuration(dur);
 		});
 	}, []);
 
@@ -145,24 +140,11 @@ export const CreateFinalVideoPhase = ({ onComplete }: { onComplete?: () => void 
 		}, 500);
 	}, []);
 
-	const handleFadeChange = useCallback((newDuration: number) => {
-		setFadeDuration(newDuration);
-		if (fadeSaveTimerRef.current) {
-			clearTimeout(fadeSaveTimerRef.current);
-		}
-		fadeSaveTimerRef.current = setTimeout(() => {
-			window.api.setDefaultFadeDuration(newDuration);
-		}, 500);
-	}, []);
-
 	// Cleanup timer khi unmount
 	useEffect(() => {
 		return () => {
 			if (volumeSaveTimerRef.current) {
 				clearTimeout(volumeSaveTimerRef.current);
-			}
-			if (fadeSaveTimerRef.current) {
-				clearTimeout(fadeSaveTimerRef.current);
 			}
 		};
 	}, []);
@@ -173,8 +155,7 @@ export const CreateFinalVideoPhase = ({ onComplete }: { onComplete?: () => void 
 		setProgress(null);
 		setOutputPath(null);
 		window.api.createFinalVideo(projectPath, { 
-			backgroundVolume: backgroundVolume / 100,
-			fadeDuration: fadeDuration
+			backgroundVolume: backgroundVolume / 100
 		});
 	};
 
@@ -318,54 +299,29 @@ export const CreateFinalVideoPhase = ({ onComplete }: { onComplete?: () => void 
 
 	const volumeSlider = (
 		<div className="w-full space-y-4 p-4 bg-muted/30 rounded-xl border border-border/40 shadow-sm">
-			<div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-4">
-				{/* Ducking Volume Slider */}
-				<div className="space-y-2.5">
-					<div className="flex justify-between items-center">
-						<label className="text-xs font-semibold text-foreground/70 flex items-center gap-2">
-							<Volume2 className="w-3.5 h-3.5 text-primary/80" />
-							Âm lượng Ducking
-						</label>
-						<span className="text-[11px] font-bold font-mono bg-primary/10 text-primary px-2 py-0.5 rounded-md border border-primary/20">
-							{backgroundVolume}%
-						</span>
-					</div>
-					<input 
-						type="range" 
-						min="0" 
-						max="100" 
-						step="1"
-						value={backgroundVolume}
-						onChange={(e) => handleVolumeChange(parseInt(e.target.value))}
-						className="w-full h-1 bg-secondary rounded-full appearance-none cursor-pointer accent-primary"
-					/>
+			<div className="space-y-2.5">
+				<div className="flex justify-between items-center">
+					<label className="text-xs font-semibold text-foreground/70 flex items-center gap-2">
+						<Volume2 className="w-3.5 h-3.5 text-primary/80" />
+						Âm lượng nền (Background & Gap)
+					</label>
+					<span className="text-[11px] font-bold font-mono bg-primary/10 text-primary px-2 py-0.5 rounded-md border border-primary/20">
+						{backgroundVolume}%
+					</span>
 				</div>
-
-				{/* Fade Duration Slider */}
-				<div className="space-y-2.5">
-					<div className="flex justify-between items-center">
-						<label className="text-xs font-semibold text-foreground/70 flex items-center gap-2">
-							<RefreshCw className="w-3.5 h-3.5 text-primary/80" />
-							Thời gian Fade
-						</label>
-						<span className="text-[11px] font-bold font-mono bg-primary/10 text-primary px-2 py-0.5 rounded-md border border-primary/20">
-							{fadeDuration.toFixed(1)}s
-						</span>
-					</div>
-					<input 
-						type="range" 
-						min="0" 
-						max="2.0" 
-						step="0.1"
-						value={fadeDuration}
-						onChange={(e) => handleFadeChange(parseFloat(e.target.value))}
-						className="w-full h-1 bg-secondary rounded-full appearance-none cursor-pointer accent-primary"
-					/>
-				</div>
+				<input 
+					type="range" 
+					min="0" 
+					max="100" 
+					step="1"
+					value={backgroundVolume}
+					onChange={(e) => handleVolumeChange(parseInt(e.target.value))}
+					className="w-full h-1 bg-secondary rounded-full appearance-none cursor-pointer accent-primary"
+				/>
 			</div>
 
 			<p className="text-[10px] text-muted-foreground/50 italic text-center border-t border-border/10 pt-2">
-				* Fade giúp âm lượng thay đổi mượt mà hơn khi vào/ra các đoạn lồng tiếng.
+				* Âm lượng nền áp dụng cho cả phần background audio (khi có lồng tiếng) và phần gap (giữa các câu).
 			</p>
 		</div>
 	);

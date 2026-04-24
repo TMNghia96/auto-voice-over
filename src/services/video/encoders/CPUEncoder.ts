@@ -78,7 +78,9 @@ export class CPUEncoder implements VideoEncoder {
       '-c:v', 'libx264',
       '-preset', options.preset,
       '-crf', options.crf.toString(),
-      '-r', options.fps.toString()
+      '-r', options.fps.toString(),
+      '-g', (options.fps * 2).toString(), // Keyframe every 2 seconds for smooth concat
+      '-keyint_min', options.fps.toString() // Min keyframe interval
     ];
 
     // Add video filter if needed

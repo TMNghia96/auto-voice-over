@@ -169,14 +169,6 @@ export class AudioSegmentBuilder {
       }
     }
 
-    // Add fade flags for gap segments
-    for (let i = 0; i < segments.length; i++) {
-      if (segments[i].type === 'gap') {
-        segments[i].fadeStart = (i > 0 && segments[i - 1].type === 'dubbed');
-        segments[i].fadeEnd = (i < segments.length - 1 && segments[i + 1].type === 'dubbed');
-      }
-    }
-
     // DEBUG: Export segment map to JSON for analysis
     console.log(`[SegmentMap] Total segments: ${segments.length}`);
     const totalTargetDuration = segments.reduce((sum, s) => sum + s.targetDuration, 0);

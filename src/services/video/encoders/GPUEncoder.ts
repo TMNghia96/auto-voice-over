@@ -108,9 +108,15 @@ export class GPUEncoder implements VideoEncoder {
 
     const args = [
       '-c:v', this.codec,
-      '-preset', options.preset,
-      '-r', options.fps.toString()
+      '-r', options.fps.toString(),
+      '-g', (options.fps * 2).toString(), // Keyframe every 2 seconds for smooth concat
+      '-keyint_min', options.fps.toString() // Min keyframe interval
     ];
+
+    // Add preset for NVIDIA only (AMD doesn't support preset)
+    if (this.gpuType === 'nvidia') {
+      args.push('-preset', options.preset);
+    }
 
     // Add video filter if needed
     if (speedFilter) {
@@ -121,8 +127,11 @@ export class GPUEncoder implements VideoEncoder {
     if (this.gpuType === 'nvidia') {
       args.push('-cq', options.crf.toString());
     } else {
-      // AMD uses quality parameter
+      // AMD uses quality parameter (speed, balanced, quality)
       args.push('-quality', 'balanced');
+      args.push('-rc', 'cqp');
+      args.push('-qp_i', '23');
+      args.push('-qp_p', '23');
     }
 
     return args;
