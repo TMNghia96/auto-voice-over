@@ -58,61 +58,6 @@ const getAtempoFilter = (speed: number): string => {
     return stack.join(',');
 };
 
-const createFadeExpression = (
-    seg: Segment,
-    duckVolume: number,
-    fadeDuration: number
-): string => {
-    const duck = duckVolume.toFixed(2);
-    
-    // If segment is too short for any meaningful fade, return constant volume
-    if (seg.targetDuration < 0.2) {
-        // For gap segments, use duck volume; for others use full volume
-        return seg.fadeStart || seg.fadeEnd ? duck : '1.0';
-    }
-    
-    const minDuration = fadeDuration * 2 + 0.1;
-    let adjustedFade = fadeDuration;
-    
-    if (seg.targetDuration < minDuration) {
-        adjustedFade = Math.max(0.05, (seg.targetDuration - 0.1) / 2);
-    }
-    
-    const fadeOutStart = seg.targetDuration - adjustedFade;
-    
-    // Ensure fadeOutStart is not negative
-    if (fadeOutStart <= 0 || adjustedFade <= 0) {
-        // Segment too short for fade, return constant duck volume
-        return duck;
-    }
-    
-    const range = (1.0 - duckVolume).toFixed(2);
-    const fade = adjustedFade.toFixed(3);
-    const fadeOut = fadeOutStart.toFixed(3);
-    
-    // Use gte instead of lt for fade-out to avoid negative time calculations
-    if (seg.fadeStart && seg.fadeEnd) {
-        return `if(lt(t,${fade}),${duck}+${range}*t/${fade},if(gte(t,${fadeOut}),1.0-${range}*(t-${fadeOut})/${fade},1.0))`;
-    } else if (seg.fadeStart) {
-        return `if(lt(t,${fade}),${duck}+${range}*t/${fade},1.0)`;
-    } else if (seg.fadeEnd) {
-        return `if(gte(t,${fadeOut}),1.0-${range}*(t-${fadeOut})/${fade},1.0)`;
-    }
-    
-    return '1.0';
-};
-
-const validateFadeExpression = (expr: string): boolean => {
-    if (expr.length > 250) return false;
-    let count = 0;
-    for (const char of expr) {
-        if (char === '(') count++;
-        if (char === ')') count--;
-        if (count < 0) return false;
-    }
-    return count === 0;
-};
-
 const getMediaDuration = async (filePath: string): Promise<number> => {
     return new Promise((resolve) => {
         const ffmpeg = getFfmpegPath();
@@ -139,13 +84,11 @@ const getMediaDuration = async (filePath: string): Promise<number> => {
 
 export class AudioProcessor {
     private duckVolume: number;
-    private fadeDuration: number;
     private ffmpegPath: string;
 
-    constructor(ffmpegPath: string, duckVolume: number = 0.15, fadeDuration: number = 0.5) {
+    constructor(ffmpegPath: string, duckVolume: number = 0.15) {
         this.ffmpegPath = ffmpegPath;
         this.duckVolume = duckVolume;
-        this.fadeDuration = fadeDuration;
     }
 
     private runFfmpeg(args: string[]): Promise<{ success: boolean; stderr: string }> {
@@ -232,65 +175,29 @@ export class AudioProcessor {
             const origDurFixed = seg.videoDuration.toFixed(4);
 
             if (seg.type === 'gap') {
-                // Skip gaps that are too short (< 0.1s) - they cause FFmpeg extraction issues
-                if (seg.videoDuration < 0.1) {
-                    console.log(`[Gap] Skipping very short gap segment ${idx} (${seg.videoDuration.toFixed(3)}s)`);
-                    // Create a minimal silent audio file instead
-                    const res = await this.runFfmpeg([
-                        '-y', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=stereo',
-                        '-t', origDurFixed,
-                        '-c:a', 'pcm_s16le', outSegWav
-                    ]);
-                    if (!res.success) {
-                        const error = `Lỗi tạo silence cho Gap ngắn (t=${startFixed}): ${res.stderr}`;
-                        processError = error;
-                        throw new Error(error);
-                    }
-                    segmentPaths[idx] = outSegWav;
-                    
-                    const actualDuration = await this.getMediaDuration(outSegWav);
-                    segmentTimings[idx] = {
-                        expectedDuration: seg.targetDuration,
-                        actualDuration: actualDuration,
-                        drift: actualDuration - seg.targetDuration
-                    };
-                } else {
-                    // Use fade expression helper
-                    const volExpr = createFadeExpression(seg, this.duckVolume, this.fadeDuration);
-                    
-                    // Debug logging
-                    console.log(`[Gap] Segment ${idx}: duration=${seg.targetDuration.toFixed(3)}s, fadeStart=${seg.fadeStart}, fadeEnd=${seg.fadeEnd}, volExpr=${volExpr}`);
-                    
-                    if (!validateFadeExpression(volExpr)) {
-                        const error = `Invalid fade expression for segment ${idx}`;
-                        console.error(`[Fade] ${error}`);
-                        processError = error;
-                        throw new Error(error);
-                    }
-
-                    const res = await this.runFfmpeg([
-                        '-y', '-ss', startFixed, '-t', origDurFixed, '-i', fullAudioWav,
-                        '-af', `volume='${volExpr}'`,
-                        '-c:a', 'pcm_s16le', outSegWav
-                    ]);
-                    if (!res.success) {
-                        const error = `Lỗi cắt âm Gap (t=${startFixed}): ${res.stderr}`;
-                        processError = error;
-                        throw new Error(error);
-                    }
-                    segmentPaths[idx] = outSegWav;
-                
-                    // Measure actual duration for sync tracking
-                    const actualDuration = await this.getMediaDuration(outSegWav);
-                    segmentTimings[idx] = {
-                        expectedDuration: seg.targetDuration,
-                        actualDuration: actualDuration,
-                        drift: actualDuration - seg.targetDuration
-                    };
-
-                    // Debug: Log detailed timing info for gap segment
-                    console.log(`[Audio] Segment ${idx} (${seg.type}): videoDur=${seg.videoDuration.toFixed(3)}s, targetDur=${seg.targetDuration.toFixed(3)}s, actualDur=${actualDuration.toFixed(3)}s, drift=${(actualDuration - seg.targetDuration).toFixed(3)}s`);
+                // Gap segments: constant duck volume (same as dubbed background)
+                const res = await this.runFfmpeg([
+                    '-y', '-ss', startFixed, '-t', origDurFixed, '-i', fullAudioWav,
+                    '-af', `volume=${this.duckVolume}`,
+                    '-c:a', 'pcm_s16le', outSegWav
+                ]);
+                if (!res.success) {
+                    const error = `Lỗi cắt âm Gap (t=${startFixed}): ${res.stderr}`;
+                    processError = error;
+                    throw new Error(error);
                 }
+                segmentPaths[idx] = outSegWav;
+            
+                // Measure actual duration for sync tracking
+                const actualDuration = await this.getMediaDuration(outSegWav);
+                segmentTimings[idx] = {
+                    expectedDuration: seg.targetDuration,
+                    actualDuration: actualDuration,
+                    drift: actualDuration - seg.targetDuration
+                };
+
+                // Debug: Log detailed timing info for gap segment
+                console.log(`[Audio] Segment ${idx} (${seg.type}): videoDur=${seg.videoDuration.toFixed(3)}s, targetDur=${seg.targetDuration.toFixed(3)}s, actualDur=${actualDuration.toFixed(3)}s, drift=${(actualDuration - seg.targetDuration).toFixed(3)}s`)
             } else {
                 // Dubbed
                 if (!seg.audioPath || !seg.audioDuration || seg.audioDuration === 0) {
