@@ -55,6 +55,8 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
     const [error, setError] = useState<string | null>(null);
     const [selectedVoiceId, setSelectedVoiceId] = useState<string>('');
     const [showVoiceModal, setShowVoiceModal] = useState(false);
+    const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
+    const previewAudioRef = useRef<HTMLAudioElement[]>([]);
 
     useEffect(() => {
         setGlobalProcessing(isGenerating);
@@ -227,6 +229,38 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
 
 
 
+    const handlePreviewVoice = async (voiceId: string) => {
+        if (!projectPath || !translatedLang || isPreviewPlaying) return;
+        setIsPreviewPlaying(true);
+
+        try {
+            const response = await window.api.generateVoicePreview(projectPath, translatedLang, voiceId);
+            if (response.error) {
+                console.error('Preview failed:', response.error);
+                return;
+            }
+
+            const { samples } = response.result;
+            for (let i = 0; i < samples.length; i++) {
+                const sample = samples[i];
+                const dataUrl = await window.api.readGeneratedAudio(sample.audioPath);
+                if (dataUrl) {
+                    await new Promise<void>((resolve) => {
+                        const audio = new Audio(dataUrl);
+                        previewAudioRef.current[i] = audio;
+                        audio.onended = () => setTimeout(resolve, 500);
+                        audio.onerror = () => resolve();
+                        audio.play().catch(() => resolve());
+                    });
+                }
+            }
+        } catch (err) {
+            console.error('Preview playback failed:', err);
+        } finally {
+            setIsPreviewPlaying(false);
+        }
+    };
+
     const hasAnyAudio = audioFiles.length > 0;
     const doneCount = Array.from(entryStatuses.values()).filter(s => s === 'done').length;
     const failedCount = Array.from(entryStatuses.values()).filter(s => s === 'failed').length;
@@ -305,6 +339,8 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
                             language={translatedLang}
                             onVoiceChange={setSelectedVoiceId}
                             onShowAllVoices={() => setShowVoiceModal(true)}
+                            onPreview={() => handlePreviewVoice(selectedVoiceId)}
+                            disabled={isGenerating || isPreviewPlaying}
                         />
                         <Button
                             size="sm"
@@ -440,6 +476,7 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
                     language={translatedLang}
                     onSelectVoice={setSelectedVoiceId}
                     onClose={() => setShowVoiceModal(false)}
+                    onPreview={handlePreviewVoice}
                 />
         </TooltipProvider>
     );

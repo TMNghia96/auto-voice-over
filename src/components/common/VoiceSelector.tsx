@@ -1,4 +1,4 @@
-import { Volume2 } from 'lucide-react';
+import { Volume2, Loader2 } from 'lucide-react';
 import {
   Select,
   SelectContent,
@@ -16,6 +16,7 @@ export interface VoiceSelectorProps {
   onPreview?: () => void;
   onShowAllVoices?: () => void;
   disabled?: boolean;
+  isPreviewPlaying?: boolean;
 }
 
 export function VoiceSelector({
@@ -25,6 +26,7 @@ export function VoiceSelector({
   onPreview,
   onShowAllVoices,
   disabled,
+  isPreviewPlaying,
 }: VoiceSelectorProps) {
   const presets = getPresetsForLanguage(language);
 
@@ -67,7 +69,11 @@ export function VoiceSelector({
           disabled={disabled}
           aria-label="Preview voice"
         >
-          <Volume2 className="h-4 w-4" />
+          {isPreviewPlaying ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Volume2 className="h-4 w-4" />
+          )}
         </Button>
       )}
     </div>

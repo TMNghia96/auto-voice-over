@@ -3,6 +3,17 @@
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string;
 declare const MAIN_WINDOW_VITE_NAME: string;
 
+interface PreviewSample {
+  index: number;
+  text: string;
+  audioPath?: string;
+}
+
+interface PreviewResult {
+  voiceId: string;
+  samples: PreviewSample[];
+}
+
 interface Window {
     api: {
         getProjects: () => Promise<any[]>;
@@ -81,6 +92,8 @@ interface Window {
         removeAudioGenerateListeners: () => void;
         listGeneratedAudio: (projectPath: string) => Promise<{ name: string; path: string }[]>;
         readGeneratedAudio: (filePath: string) => Promise<string | null>;
+        generateVoicePreview: (projectPath: string, lang: string, voiceId: string) => Promise<{ success: boolean; result?: PreviewResult; error?: string }>;
+        cleanupOldPreviews: (projectPath: string) => Promise<{ success: boolean; error?: string }>;
         readVideoFile: (filePath: string) => Promise<string | null>;
 
         checkFinalVideoReady: (projectPath: string) => Promise<{ ready: boolean; missing?: string; existingFinal?: string | null }>;

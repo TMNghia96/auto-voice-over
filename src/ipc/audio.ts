@@ -2,7 +2,7 @@ import { ipcMain } from "electron";
 import { transcribeAudio, getExistingSrt } from "../services/TranscriptService";
 import { optimizeSrtFile, parseSrt as parseSrtMain } from "../lib/SrtOptimizer";
 
-import { generateAllAudio, generateAudioSegment, VOICE_MAP } from "../services/PiperService";
+import { generateAllAudio, generateAudioSegment, generateVoicePreview, cleanupOldPreviews, VOICE_MAP } from "../services/PiperService";
 import fs from "fs";
 import path from "path";
 
@@ -304,6 +304,38 @@ export const setupAudioIpc = () => {
             return `data:${mime};base64,${base64}`;
         } catch {
             return null;
+        }
+    });
+
+    ipcMain.handle(
+        "generate-voice-preview",
+        async (_event, projectPath: string, lang: string, voiceId: string) => {
+            try {
+                const srtPath = path.join(projectPath, "translate", `${lang}.srt`);
+                if (!fs.existsSync(srtPath)) {
+                    return { error: "Không tìm thấy file SRT đã dịch!" };
+                }
+                const srtContent = fs.readFileSync(srtPath, "utf-8");
+                const entries = parseSrtMain(srtContent);
+                if (entries.length < 5) {
+                    return { error: "Cần ít nhất 5 đoạn phụ đề để tạo preview" };
+                }
+                const result = await generateVoicePreview(entries, voiceId, projectPath, 3);
+                return { success: true, result };
+            } catch (err) {
+                console.error("Preview generation failed:", err);
+                return { error: `Lỗi: ${err}` };
+            }
+        }
+    );
+
+    ipcMain.handle("cleanup-old-previews", (_event, projectPath: string) => {
+        try {
+            cleanupOldPreviews();
+            return { success: true };
+        } catch (err) {
+            console.error("Preview cleanup failed:", err);
+            return { error: `Lỗi: ${err}` };
         }
     });
 };

@@ -48,6 +48,7 @@ export interface SrtEntryParams {
 export interface PreviewSample {
   index: number;
   text: string;
+  audioPath?: string;
 }
 
 export interface PreviewResult {
@@ -206,10 +207,11 @@ export const selectRandomEntries = (entries: SrtEntryParams[], count: number): S
 export const generateVoicePreview = async (
   entries: SrtEntryParams[],
   voiceId: string,
-  _projectDir: string,
+  projectDir: string,
   sampleCount = 3
 ): Promise<PreviewResult> => {
-  const cachePath = getPreviewCachePath(voiceId);
+  const previewsDir = path.join(projectDir, PREVIEW_CACHE_DIR, voiceId);
+  const cachePath = path.join(previewsDir, 'cache.json');
 
   // Check cache
   if (fs.existsSync(cachePath)) {
@@ -221,7 +223,18 @@ export const generateVoicePreview = async (
   }
 
   const selected = selectRandomEntries(entries, sampleCount);
-  const samples: PreviewSample[] = selected.map(e => ({ index: e.index, text: e.text }));
+  const samples: PreviewSample[] = [];
+
+  for (const entry of selected) {
+    const fileName = `preview_${entry.index}.mp3`;
+    const audioPath = path.join(previewsDir, fileName);
+    const success = await generateAudioSegment(entry.text, voiceId, audioPath, entry);
+    samples.push({
+      index: entry.index,
+      text: entry.text,
+      audioPath: success ? audioPath : undefined,
+    });
+  }
 
   const result: PreviewResult & { cachedAt: number } = {
     voiceId,
@@ -238,8 +251,8 @@ export const generateVoicePreview = async (
 /**
  * Remove preview caches older than 7 days.
  */
-export const cleanupOldPreviews = (): void => {
-  const previewsDir = path.join(PREVIEW_CACHE_DIR);
+export const cleanupOldPreviews = (projectDir?: string): void => {
+  const previewsDir = projectDir ? path.join(projectDir, PREVIEW_CACHE_DIR) : PREVIEW_CACHE_DIR;
   if (!fs.existsSync(previewsDir)) return;
 
   const sevenDays = 7 * 24 * 60 * 60 * 1000;

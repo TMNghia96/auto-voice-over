@@ -83,6 +83,8 @@ contextBridge.exposeInMainWorld('api', {
     onAudioGenerateProgress: (callback: (progress: any) => void) => ipcRenderer.on('audio-generate-progress', (event, progress) => callback(progress)),
     removeAudioGenerateListeners: () => ipcRenderer.removeAllListeners('audio-generate-progress'),
     listGeneratedAudio: (projectPath: string) => ipcRenderer.invoke('list-generated-audio', projectPath),
+    generateVoicePreview: (projectPath: string, lang: string, voiceId: string) => ipcRenderer.invoke('generate-voice-preview', projectPath, lang, voiceId),
+    cleanupOldPreviews: (projectPath: string) => ipcRenderer.invoke('cleanup-old-previews', projectPath),
     readGeneratedAudio: (filePath: string) => ipcRenderer.invoke('read-generated-audio', filePath),
     readVideoFile: (filePath: string) => ipcRenderer.invoke('read-video-file', filePath),
 
