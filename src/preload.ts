@@ -79,6 +79,7 @@ contextBridge.exposeInMainWorld('api', {
     getTranslatedSrt: (projectPath: string, lang: string) => ipcRenderer.invoke('get-translated-srt', projectPath, lang),
 
     generateAudio: (projectPath: string, lang: string, voiceId?: string) => ipcRenderer.send('generate-audio', projectPath, lang, voiceId),
+    cancelAudioGeneration: () => ipcRenderer.send('cancel-audio-generation'),
     generateSingleAudio: (projectPath: string, lang: string, targetIndex: number, voiceId?: string) => ipcRenderer.invoke('generate-single-audio', projectPath, lang, targetIndex, voiceId),
     retryFailedAudio: (projectPath: string, lang: string, failedIndices: number[], voiceId?: string) => ipcRenderer.invoke('retry-failed-audio', projectPath, lang, failedIndices, voiceId),
     onAudioGenerateProgress: (callback: (progress: any) => void) => ipcRenderer.on('audio-generate-progress', (event, progress) => callback(progress)),

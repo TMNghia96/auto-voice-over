@@ -77,7 +77,8 @@ export const generateAudioSegment = async (
     text: string,
     voiceName: string,
     outputPath: string,
-    entry?: SrtEntryParams
+    entry?: SrtEntryParams,
+    timeoutMs: number = 30000
 ): Promise<boolean> => {
     let cleanText = text.replace(/\n/g, ' ').replace(/\s+/g, ' ').trim();
     if (!cleanText) {
@@ -94,6 +95,24 @@ export const generateAudioSegment = async (
         return new Promise<boolean>((resolve) => {
             const writeStream = fs.createWriteStream(outputPath);
             let hasData = false;
+            let finalized = false;
+
+            const done = (success: boolean) => {
+                if (finalized) return;
+                finalized = true;
+                clearTimeout(timer);
+                resolve(success);
+            };
+
+            const timer = setTimeout(() => {
+                console.error(`Timeout ${timeoutMs}ms for ${outputPath}`);
+                audioStream.destroy();
+                writeStream.end(() => {
+                    tts.close();
+                    if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+                    done(false);
+                });
+            }, timeoutMs);
 
             audioStream.on('data', (chunk: Buffer) => {
                 hasData = true;
@@ -106,14 +125,14 @@ export const generateAudioSegment = async (
                     if (hasData && fs.existsSync(outputPath)) {
                         const stat = fs.statSync(outputPath);
                         if (stat.size > 0) {
-                            resolve(true); // Produced valid audio
+                            done(true);
                         } else {
                             fs.unlinkSync(outputPath);
-                            resolve(true); // TTS skipped it / returned no audio. We return true so it acts as an intentional silent gap instead of failing.
+                            done(true);
                         }
                     } else {
                         if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-                        resolve(true); // Graceful fallback
+                        done(true);
                     }
                 });
             });
@@ -123,7 +142,7 @@ export const generateAudioSegment = async (
                 writeStream.end(() => {
                     tts.close();
                     if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-                    resolve(false);
+                    done(false);
                 });
             });
         });
@@ -133,6 +152,16 @@ export const generateAudioSegment = async (
         return false;
     }
 };
+
+export function categorizeError(error: any): string {
+  const message = error?.message || String(error);
+  if (message.includes('timeout') || message.includes('ETIMEDOUT')) return 'Network timeout';
+  if (message.includes('ECONNREFUSED') || message.includes('ENOTFOUND')) return 'No internet connection';
+  if (message.includes('429') || message.includes('rate limit')) return 'Rate limited';
+  if (message.includes('ENOSPC')) return 'Disk space full';
+  if (message.includes('EACCES') || message.includes('EPERM')) return 'Permission denied';
+  return 'Unknown error';
+}
 
 // Internal reference for testing - allows mocking internal calls
 export const _internal = {
@@ -149,20 +178,30 @@ export const generateAudioSegmentWithRetry = async (
     outputPath: string,
     entry?: SrtEntryParams,
     maxRetries = 2
-): Promise<boolean> => {
+): Promise<{ success: boolean; error?: string }> => {
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        const success = await _internal.generateAudioSegment(text, voiceName, outputPath, entry);
-        if (success) {
-            return true;
+        try {
+            const success = await _internal.generateAudioSegment(text, voiceName, outputPath, entry);
+            if (success) {
+                return { success: true };
+            }
+        } catch (err) {
+            if (attempt < maxRetries) {
+                const delay = Math.pow(2, attempt) * 1000;
+                console.log(`Retry ${attempt + 1}/${maxRetries} for ${outputPath} after ${delay}ms`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+                continue;
+            }
+            return { success: false, error: categorizeError(err) };
         }
         
         if (attempt < maxRetries) {
-            const delay = Math.pow(2, attempt) * 1000; // 1s, 2s
+            const delay = Math.pow(2, attempt) * 1000;
             console.log(`Retry ${attempt + 1}/${maxRetries} for ${outputPath} after ${delay}ms`);
             await new Promise(resolve => setTimeout(resolve, delay));
         }
     }
-    return false;
+    return { success: false };
 };
 
 /**
@@ -284,8 +323,11 @@ const generateAllAudioParallel = async (
     outputDir: string,
     onProgress: (p: TTSProgress) => void,
     initialConcurrency: number,
-    voiceId?: string
+    voiceId?: string,
+    signal?: AbortSignal
 ): Promise<string[]> => {
+    if (signal?.aborted) return [];
+
     const results: string[] = new Array(entries.length).fill('');
     const stats: ConcurrencyStats = {
         successCount: 0,
@@ -293,6 +335,7 @@ const generateAllAudioParallel = async (
         currentLimit: initialConcurrency,
         lastAdjustTime: Date.now(),
     };
+    const errorCounts: Record<string, number> = {};
 
     let currentConcurrency = initialConcurrency;
     const limit = pLimit(currentConcurrency);
@@ -300,6 +343,8 @@ const generateAllAudioParallel = async (
 
     const tasks = entries.map((entry, i) => {
         return limit(async () => {
+            if (signal?.aborted) return;
+
             const fileName = `${String(entry.index).padStart(4, '0')}.mp3`;
             const outputPath = path.join(outputDir, fileName);
 
@@ -313,9 +358,9 @@ const generateAllAudioParallel = async (
                 entryStatus: 'start',
             });
 
-            const success = await generateAudioSegmentWithRetry(entry.text, voiceName, outputPath, entry);
+            const result = await generateAudioSegmentWithRetry(entry.text, voiceName, outputPath, entry);
 
-            if (success) {
+            if (result.success) {
                 stats.successCount++;
                 results[i] = outputPath;
             } else {
@@ -324,17 +369,27 @@ const generateAllAudioParallel = async (
 
             completed++;
 
+            let detail = `Đang tạo audio... ${completed}/${entries.length}`;
+            if (!result.success && result.error) {
+                const errType = result.error;
+                errorCounts[errType] = (errorCounts[errType] || 0) + 1;
+                if (errorCounts[errType] > 3 && errType === 'Rate limited' && currentConcurrency > 1) {
+                    currentConcurrency = Math.max(1, currentConcurrency - 1);
+                    errorCounts[errType] = 0;
+                }
+                detail = `Lỗi (${errType}) - ${completed}/${entries.length}`;
+            }
+
             onProgress({
                 status: 'generating',
                 progress: Math.round((completed / entries.length) * 100),
-                detail: `Đang tạo audio... ${completed}/${entries.length}`,
+                detail,
                 current: completed,
                 total: entries.length,
                 entryIndex: entry.index,
-                entryStatus: success ? 'done' : 'failed',
+                entryStatus: result.success ? 'done' : 'failed',
             });
 
-            // Adjust concurrency every 10 completions
             if (completed % 10 === 0) {
                 const newConcurrency = adjustConcurrency(stats);
                 if (newConcurrency !== stats.currentLimit) {
@@ -342,7 +397,6 @@ const generateAllAudioParallel = async (
                     stats.currentLimit = newConcurrency;
                     stats.lastAdjustTime = Date.now();
                     currentConcurrency = newConcurrency;
-                    // Note: p-limit doesn't support dynamic adjustment, but we track it for future batches
                 }
             }
         });
@@ -362,8 +416,11 @@ export const generateAllAudio = async (
     outputDir: string,
     onProgress: (p: TTSProgress) => void,
     concurrency = 1,
-    voiceId?: string
+    voiceId?: string,
+    signal?: AbortSignal
 ): Promise<string[]> => {
+    if (signal?.aborted) return [];
+
     ensureDir(outputDir);
 
     const voiceName = voiceId || VOICE_MAP[langCode]?.voice;
@@ -372,15 +429,15 @@ export const generateAllAudio = async (
         return [];
     }
 
-    // Use parallel processing if concurrency > 1
     if (concurrency > 1) {
-        return generateAllAudioParallel(entries, voiceName, outputDir, onProgress, concurrency, voiceId);
+        return generateAllAudioParallel(entries, voiceName, outputDir, onProgress, concurrency, voiceId, signal);
     }
 
-    // Sequential fallback (concurrency = 1)
     const results: string[] = new Array(entries.length).fill('');
 
     for (let i = 0; i < entries.length; i++) {
+        if (signal?.aborted) return results;
+
         const entry = entries[i];
         const fileName = `${String(entry.index).padStart(4, '0')}.mp3`;
         const outputPath = path.join(outputDir, fileName);
@@ -395,9 +452,9 @@ export const generateAllAudio = async (
             entryStatus: 'start',
         });
 
-        const success = await generateAudioSegment(entry.text, voiceName, outputPath, entry);
+        const result = await generateAudioSegmentWithRetry(entry.text, voiceName, outputPath, entry);
 
-        if (success) {
+        if (result.success) {
             results[i] = outputPath;
         }
 
@@ -408,7 +465,7 @@ export const generateAllAudio = async (
             current: i + 1,
             total: entries.length,
             entryIndex: entry.index,
-            entryStatus: success ? 'done' : 'failed',
+            entryStatus: result.success ? 'done' : 'failed',
         });
     }
 

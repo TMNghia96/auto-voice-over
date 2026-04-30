@@ -7,6 +7,8 @@ import { getVoicePreference, setVoicePreference } from "../services/ProjectConfi
 import fs from "fs";
 import path from "path";
 
+let abortController: AbortController | null = null;
+
 export const setupAudioIpc = () => {
     ipcMain.handle("get-existing-srt", (_event, projectPath) => {
         return getExistingSrt(projectPath);
@@ -105,6 +107,7 @@ export const setupAudioIpc = () => {
     ipcMain.on(
         "generate-audio",
         async (event, projectPath: string, lang: string, voiceId?: string) => {
+            abortController = new AbortController();
             try {
                 const srtPath = path.join(projectPath, "translate", `${lang}.srt`);
                 if (!fs.existsSync(srtPath)) {
@@ -158,9 +161,19 @@ export const setupAudioIpc = () => {
                     (p) => {
                         event.sender.send("audio-generate-progress", p);
                     },
-                    5, // concurrency
-                    voiceId
+                    5,
+                    voiceId,
+                    abortController.signal
                 );
+
+                if (abortController.signal.aborted) {
+                    event.sender.send("audio-generate-progress", {
+                        status: "error",
+                        progress: 0,
+                        detail: "Đã hủy tạo audio.",
+                    });
+                    return;
+                }
 
                 const successCount = results.filter((r) => r !== "").length;
                 event.sender.send("audio-generate-progress", {
@@ -177,9 +190,18 @@ export const setupAudioIpc = () => {
                     progress: 0,
                     detail: `Lỗi: ${err}`,
                 });
+            } finally {
+                abortController = null;
             }
         },
     );
+
+    ipcMain.on("cancel-audio-generation", () => {
+        if (abortController) {
+            abortController.abort();
+            abortController = null;
+        }
+    });
 
     ipcMain.handle(
         "generate-single-audio",

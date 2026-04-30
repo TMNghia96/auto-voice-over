@@ -361,25 +361,40 @@ const getEntryState = (index: number): EntryState => entryStatuses.get(index) ||
                             onPreview={() => handlePreviewVoice(selectedVoiceId)}
                             disabled={isGenerating || isPreviewPlaying}
                         />
-                        <Button
-                            size="sm"
-                            variant={hasAnyAudio ? "outline" : "default"}
-                            className="gap-2"
-                            onClick={handleStartGenerate}
-                            disabled={isGenerating}
-                        >
-                            {isGenerating ? (
-                                <>
-                                    <Spinner className="w-3.5 h-3.5 animate-spin" />
-                                    Đang tạo...
-                                </>
-                            ) : (
-                                <>
-                                    <Music className="w-3.5 h-3.5" />
-                                    {hasAnyAudio ? "Tạo lại" : "Bắt đầu tạo"}
-                                </>
-                            )}
-                        </Button>
+                        {isGenerating && progress ? (
+                            <Button
+                                size="sm"
+                                variant="destructive"
+                                className="gap-2"
+                                onClick={() => {
+                                    window.api.cancelAudioGeneration();
+                                    setIsGenerating(false);
+                                }}
+                            >
+                                <Square className="w-3.5 h-3.5" />
+                                Hủy
+                            </Button>
+                        ) : (
+                            <Button
+                                size="sm"
+                                variant={hasAnyAudio ? "outline" : "default"}
+                                className="gap-2"
+                                onClick={handleStartGenerate}
+                                disabled={isGenerating}
+                            >
+                                {isGenerating ? (
+                                    <>
+                                        <Spinner className="w-3.5 h-3.5 animate-spin" />
+                                        Đang tạo...
+                                    </>
+                                ) : (
+                                    <>
+                                        <Music className="w-3.5 h-3.5" />
+                                        {hasAnyAudio ? "Tạo lại" : "Bắt đầu tạo"}
+                                    </>
+                                )}
+                            </Button>
+                        )}
                         {onComplete && hasAnyAudio && (
                             <Button size="sm" onClick={onComplete} className="bg-primary text-primary-foreground hover:bg-primary/90 shadow-sm">
                                 Tiếp tục
