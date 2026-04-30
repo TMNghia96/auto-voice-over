@@ -33,6 +33,12 @@ interface AudioProgress {
     entryStatus?: 'start' | 'done' | 'failed';
 }
 
+interface EntryState {
+    status: EntryAudioStatus;
+    attempts: number;
+    lastError?: string;
+}
+
 type EntryAudioStatus = 'pending' | 'generating' | 'done' | 'failed';
 
 export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) => {
@@ -44,7 +50,9 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
     const [isGenerating, setIsGenerating] = useState(false);
     const [progress, setProgress] = useState<AudioProgress | null>(null);
     const [audioFiles, setAudioFiles] = useState<{ name: string; path: string }[]>([]);
-    const [entryStatuses, setEntryStatuses] = useState<Map<number, EntryAudioStatus>>(new Map());
+    const [entryStatuses, setEntryStatuses] = useState<Map<number, EntryState>>(new Map());
+
+const getEntryState = (index: number): EntryState => entryStatuses.get(index) || { status: 'pending', attempts: 0 };
     const [playingIndex, setPlayingIndex] = useState<number | null>(null);
     const audioRef = useRef<HTMLAudioElement | null>(null);
 
@@ -103,13 +111,13 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
                     const existingAudio = await window.api.listGeneratedAudio(project.path);
                     if (existingAudio && existingAudio.length > 0) {
                         setAudioFiles(existingAudio);
-                        const statuses = new Map<number, EntryAudioStatus>();
+                        const statuses = new Map<number, EntryState>();
                         entries.forEach(entry => {
                             const baseName = `${String(entry.index).padStart(4, '0')}`;
                             const hasAudio = existingAudio.some((f: { name: string }) =>
                                 f.name === `${baseName}.mp3` || f.name === `${baseName}.wav`
                             );
-                            statuses.set(entry.index, hasAudio ? 'done' : 'pending');
+                            statuses.set(entry.index, { status: hasAudio ? 'done' : 'pending', attempts: 0 });
                         });
                         setEntryStatuses(statuses);
                     }
@@ -136,12 +144,13 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
             if (progressData.entryIndex !== undefined && progressData.entryStatus) {
                 setEntryStatuses(prev => {
                     const next = new Map(prev);
+                    const prevState = next.get(progressData.entryIndex!) || { status: 'pending', attempts: 0 };
                     if (progressData.entryStatus === 'start') {
-                        next.set(progressData.entryIndex!, 'generating');
+                        next.set(progressData.entryIndex!, { status: 'generating', attempts: prevState.attempts + 1, lastError: undefined });
                     } else if (progressData.entryStatus === 'done') {
-                        next.set(progressData.entryIndex!, 'done');
+                        next.set(progressData.entryIndex!, { status: 'done', attempts: prevState.attempts, lastError: undefined });
                     } else if (progressData.entryStatus === 'failed') {
-                        next.set(progressData.entryIndex!, 'failed');
+                        next.set(progressData.entryIndex!, { status: 'failed', attempts: prevState.attempts, lastError: progressData.detail });
                     }
                     return next;
                 });
@@ -170,9 +179,9 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
         setIsGenerating(true);
         retryCountRef.current = 0;
         setProgress(null);
-        const statuses = new Map<number, EntryAudioStatus>();
+        const statuses = new Map<number, EntryState>();
         translatedEntries.forEach(entry => {
-            statuses.set(entry.index, 'pending');
+            statuses.set(entry.index, { status: 'pending', attempts: 0 });
         });
         setEntryStatuses(statuses);
         setAudioFiles([]);
@@ -262,8 +271,8 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
     };
 
     const hasAnyAudio = audioFiles.length > 0;
-    const doneCount = Array.from(entryStatuses.values()).filter(s => s === 'done').length;
-    const failedCount = Array.from(entryStatuses.values()).filter(s => s === 'failed').length;
+    const doneCount = Array.from(entryStatuses.values()).filter(s => s.status === 'done').length;
+    const failedCount = Array.from(entryStatuses.values()).filter(s => s.status === 'failed').length;
 
     if (phase === "loading") {
         return (
@@ -379,6 +388,26 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
                     </div>
                 )}
 
+                {!isGenerating && failedCount > 0 && (
+                    <div className="shrink-0">
+                        <Button
+                            size="sm"
+                            variant="destructive"
+                            className="gap-2 w-full"
+                            onClick={async () => {
+                                setIsGenerating(true);
+                                const failedIndices = translatedEntries
+                                    .map(e => e.index)
+                                    .filter(idx => getEntryState(idx).status === 'failed');
+                                await window.api.retryFailedAudio(projectPath, translatedLang, failedIndices, selectedVoiceId);
+                            }}
+                        >
+                            <RefreshCw className="w-3.5 h-3.5" />
+                            Tạo lại {failedCount} đoạn lỗi
+                        </Button>
+                    </div>
+                )}
+
                 <div className="flex-1 overflow-y-auto border rounded-xl">
                     <div className="divide-y">
                         {translatedEntries.map((entry, i) => {
@@ -386,7 +415,8 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
                             const audioFile = audioFiles.find(f =>
                                 f.name === `${baseName}.mp3` || f.name === `${baseName}.wav`
                             );
-                            const status = entryStatuses.get(entry.index) || 'pending';
+                            const entryState = getEntryState(entry.index);
+                            const status = entryState.status;
                             const isPlaying = playingIndex === i;
 
                             return (
@@ -394,7 +424,9 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
                                     key={entry.index}
                                     className={`flex items-center gap-3 p-3 transition-colors group ${status === 'generating'
                                         ? 'bg-primary/5 border-l-2 border-l-primary'
-                                        : 'hover:bg-muted/30'
+                                        : status === 'failed'
+                                            ? 'bg-destructive/5 border-l-2 border-l-destructive'
+                                            : 'hover:bg-muted/30'
                                         }`}
                                 >
 
@@ -425,8 +457,16 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
                                     <div className="flex-1 min-w-0">
                                         <p className="text-xs text-muted-foreground font-mono mb-0.5">
                                             #{entry.index} • {entry.startTime}
+                                            {entryState.attempts > 1 && (
+                                                <span className="ml-2 text-yellow-500 font-medium">({entryState.attempts} lần thử)</span>
+                                            )}
                                         </p>
                                         <p className="text-sm truncate">{entry.text}</p>
+                                        {status === 'failed' && entryState.lastError && (
+                                            <p className="text-xs text-destructive mt-0.5 truncate" title={entryState.lastError}>
+                                                {entryState.lastError}
+                                            </p>
+                                        )}
                                     </div>
 
 

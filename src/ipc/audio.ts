@@ -329,6 +329,36 @@ export const setupAudioIpc = () => {
         }
     );
 
+    ipcMain.handle(
+        "retry-failed-audio",
+        async (event, projectPath: string, lang: string, failedIndices: number[], voiceId?: string) => {
+            try {
+                const srtPath = path.join(projectPath, "translate", `${lang}.srt`);
+                if (!fs.existsSync(srtPath)) {
+                    return { success: false, error: "Không tìm thấy file SRT đã dịch!" };
+                }
+                const srtContent = fs.readFileSync(srtPath, "utf-8");
+                const entries = parseSrtMain(srtContent);
+                const failedEntries = entries.filter(e => failedIndices.includes(e.index));
+                if (failedEntries.length === 0) {
+                    return { success: false, error: "Không có đoạn nào cần tạo lại" };
+                }
+                const outputDir = path.join(projectPath, "audio_gene");
+                if (!fs.existsSync(outputDir)) {
+                    fs.mkdirSync(outputDir, { recursive: true });
+                }
+                const results = await generateAllAudio(
+                    failedEntries, lang, outputDir, (p) => { event.sender.send("audio-generate-progress", p); }, 5, voiceId
+                );
+                const successCount = results.filter((r) => r !== "").length;
+                return { success: true, successCount, totalCount: failedEntries.length };
+            } catch (err) {
+                console.error("Batch retry failed:", err);
+                return { success: false, error: `Lỗi: ${err}` };
+            }
+        }
+    );
+
     ipcMain.handle("cleanup-old-previews", (_event, projectPath: string) => {
         try {
             cleanupOldPreviews();

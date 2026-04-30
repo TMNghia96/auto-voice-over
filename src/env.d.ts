@@ -88,6 +88,7 @@ interface Window {
 
         generateAudio: (projectPath: string, lang: string, voiceId?: string) => void;
         generateSingleAudio: (projectPath: string, lang: string, targetIndex: number, voiceId?: string) => Promise<boolean>;
+        retryFailedAudio: (projectPath: string, lang: string, failedIndices: number[], voiceId?: string) => Promise<{ success: boolean; successCount?: number; totalCount?: number; error?: string }>;
         onAudioGenerateProgress: (callback: (progress: any) => void) => void;
         removeAudioGenerateListeners: () => void;
         listGeneratedAudio: (projectPath: string) => Promise<{ name: string; path: string }[]>;

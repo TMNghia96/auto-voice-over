@@ -80,6 +80,7 @@ contextBridge.exposeInMainWorld('api', {
 
     generateAudio: (projectPath: string, lang: string, voiceId?: string) => ipcRenderer.send('generate-audio', projectPath, lang, voiceId),
     generateSingleAudio: (projectPath: string, lang: string, targetIndex: number, voiceId?: string) => ipcRenderer.invoke('generate-single-audio', projectPath, lang, targetIndex, voiceId),
+    retryFailedAudio: (projectPath: string, lang: string, failedIndices: number[], voiceId?: string) => ipcRenderer.invoke('retry-failed-audio', projectPath, lang, failedIndices, voiceId),
     onAudioGenerateProgress: (callback: (progress: any) => void) => ipcRenderer.on('audio-generate-progress', (event, progress) => callback(progress)),
     removeAudioGenerateListeners: () => ipcRenderer.removeAllListeners('audio-generate-progress'),
     listGeneratedAudio: (projectPath: string) => ipcRenderer.invoke('list-generated-audio', projectPath),
