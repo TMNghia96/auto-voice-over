@@ -45,6 +45,22 @@ export interface SrtEntryParams {
     endTime?: string;
 }
 
+export interface PreviewSample {
+  index: number;
+  text: string;
+}
+
+export interface PreviewResult {
+  voiceId: string;
+  samples: PreviewSample[];
+}
+
+const PREVIEW_CACHE_DIR = '.auto-voice-over/previews';
+
+const getPreviewCachePath = (voiceId: string): string => {
+  return path.join(PREVIEW_CACHE_DIR, voiceId, 'cache.json');
+};
+
 export interface ConcurrencyStats {
     successCount: number;
     failCount: number;
@@ -168,6 +184,82 @@ const adjustConcurrency = (stats: ConcurrencyStats): number => {
     }
 
     return stats.currentLimit;
+};
+
+/**
+ * Pick `count` random entries from the middle of the list,
+ * avoiding the first 2 and last 2 entries.
+ */
+export const selectRandomEntries = (entries: SrtEntryParams[], count: number): SrtEntryParams[] => {
+  if (entries.length <= 4) {
+    return entries.slice();
+  }
+  const middle = entries.slice(2, entries.length - 2);
+  const shuffled = [...middle].sort(() => Math.random() - 0.5);
+  return shuffled.slice(0, Math.min(count, shuffled.length));
+};
+
+/**
+ * Generate a voice preview: pick random entries and return them as samples.
+ * Caches the result in `.auto-voice-over/previews/{voiceId}/cache.json` (24h TTL).
+ */
+export const generateVoicePreview = async (
+  entries: SrtEntryParams[],
+  voiceId: string,
+  _projectDir: string,
+  sampleCount = 3
+): Promise<PreviewResult> => {
+  const cachePath = getPreviewCachePath(voiceId);
+
+  // Check cache
+  if (fs.existsSync(cachePath)) {
+    const cached = JSON.parse(fs.readFileSync(cachePath, 'utf-8')) as PreviewResult & { cachedAt: number };
+    const age = Date.now() - cached.cachedAt;
+    if (age < 24 * 60 * 60 * 1000) {
+      return { voiceId: cached.voiceId, samples: cached.samples };
+    }
+  }
+
+  const selected = selectRandomEntries(entries, sampleCount);
+  const samples: PreviewSample[] = selected.map(e => ({ index: e.index, text: e.text }));
+
+  const result: PreviewResult & { cachedAt: number } = {
+    voiceId,
+    samples,
+    cachedAt: Date.now(),
+  };
+
+  ensureDir(path.dirname(cachePath));
+  fs.writeFileSync(cachePath, JSON.stringify(result, null, 2));
+
+  return { voiceId, samples };
+};
+
+/**
+ * Remove preview caches older than 7 days.
+ */
+export const cleanupOldPreviews = (): void => {
+  const previewsDir = path.join(PREVIEW_CACHE_DIR);
+  if (!fs.existsSync(previewsDir)) return;
+
+  const sevenDays = 7 * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+
+  const voiceDirs = fs.readdirSync(previewsDir);
+  for (const voiceDir of voiceDirs) {
+    const cacheFile = path.join(previewsDir, voiceDir, 'cache.json');
+    if (fs.existsSync(cacheFile)) {
+      const stat = fs.statSync(cacheFile);
+      if (now - stat.mtimeMs > sevenDays) {
+        fs.unlinkSync(cacheFile);
+        // Remove empty parent directory
+        const parent = path.dirname(cacheFile);
+        if (fs.readdirSync(parent).length === 0) {
+          fs.rmdirSync(parent);
+        }
+      }
+    }
+  }
 };
 
 /**

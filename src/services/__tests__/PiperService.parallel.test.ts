@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { generateAllAudio, _internal } from '../PiperService';
+import { generateAllAudio, _internal, generateVoicePreview } from '../PiperService';
 import type { SrtEntryParams } from '../PiperService';
 
 describe('PiperService - Parallel Processing', () => {
@@ -72,4 +72,32 @@ describe('PiperService - Parallel Processing', () => {
         
         mockGenerateAudioSegment.mockRestore();
     }, 10000);
+});
+
+describe('generateVoicePreview', () => {
+  it('should generate 3 random preview samples', async () => {
+    const entries = Array.from({ length: 20 }, (_, i) => ({
+      index: i + 1,
+      text: `Sample text ${i + 1}`,
+      startTime: '00:00:00,000',
+      endTime: '00:00:02,000',
+    }));
+    const result = await generateVoicePreview(entries, 'en-US-JennyNeural', '/tmp/project', 3);
+    expect(result.voiceId).toBe('en-US-JennyNeural');
+    expect(result.samples.length).toBe(3);
+    expect(result.samples[0].index).toBeGreaterThan(2);
+    expect(result.samples[0].index).toBeLessThan(entries.length - 2);
+  });
+
+  it('should use cache for repeated previews', async () => {
+    const entries = Array.from({ length: 10 }, (_, i) => ({
+      index: i + 1,
+      text: `Sample ${i + 1}`,
+      startTime: '00:00:00,000',
+      endTime: '00:00:02,000',
+    }));
+    const result1 = await generateVoicePreview(entries, 'en-US-GuyNeural', '/tmp/project', 3);
+    const result2 = await generateVoicePreview(entries, 'en-US-GuyNeural', '/tmp/project', 3);
+    expect(result1.samples).toEqual(result2.samples);
+  });
 });
