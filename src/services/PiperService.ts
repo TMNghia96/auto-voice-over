@@ -47,8 +47,9 @@ export interface SrtEntryParams {
 
 export interface ConcurrencyStats {
     successCount: number;
-    failureCount: number;
-    totalAttempts: number;
+    failCount: number;
+    currentLimit: number;
+    lastAdjustTime: number;
 }
 
 /**
@@ -151,20 +152,22 @@ export const generateAudioSegmentWithRetry = async (
  * Adjust concurrency based on success rate.
  * Increase if >95% success, decrease if <80%.
  */
-const adjustConcurrency = (stats: ConcurrencyStats, currentConcurrency: number): number => {
-    if (stats.totalAttempts < 10) {
-        return currentConcurrency; // Not enough data
+const adjustConcurrency = (stats: ConcurrencyStats): number => {
+    const totalAttempts = stats.successCount + stats.failCount;
+    
+    if (totalAttempts < 10) {
+        return stats.currentLimit; // Not enough data
     }
 
-    const successRate = stats.successCount / stats.totalAttempts;
+    const successRate = stats.successCount / totalAttempts;
 
-    if (successRate > 0.95 && currentConcurrency < 10) {
-        return currentConcurrency + 1;
-    } else if (successRate < 0.80 && currentConcurrency > 1) {
-        return Math.max(1, currentConcurrency - 1);
+    if (successRate > 0.95 && stats.currentLimit < 10) {
+        return stats.currentLimit + 1;
+    } else if (successRate < 0.80 && stats.currentLimit > 1) {
+        return Math.max(1, stats.currentLimit - 1);
     }
 
-    return currentConcurrency;
+    return stats.currentLimit;
 };
 
 /**
@@ -180,8 +183,9 @@ const generateAllAudioParallel = async (
     const results: string[] = new Array(entries.length).fill('');
     const stats: ConcurrencyStats = {
         successCount: 0,
-        failureCount: 0,
-        totalAttempts: 0,
+        failCount: 0,
+        currentLimit: initialConcurrency,
+        lastAdjustTime: Date.now(),
     };
 
     let currentConcurrency = initialConcurrency;
@@ -205,12 +209,11 @@ const generateAllAudioParallel = async (
 
             const success = await generateAudioSegmentWithRetry(entry.text, voiceName, outputPath, entry);
 
-            stats.totalAttempts++;
             if (success) {
                 stats.successCount++;
                 results[i] = outputPath;
             } else {
-                stats.failureCount++;
+                stats.failCount++;
             }
 
             completed++;
@@ -227,9 +230,11 @@ const generateAllAudioParallel = async (
 
             // Adjust concurrency every 10 completions
             if (completed % 10 === 0) {
-                const newConcurrency = adjustConcurrency(stats, currentConcurrency);
-                if (newConcurrency !== currentConcurrency) {
-                    console.log(`Adjusting concurrency: ${currentConcurrency} -> ${newConcurrency}`);
+                const newConcurrency = adjustConcurrency(stats);
+                if (newConcurrency !== stats.currentLimit) {
+                    console.log(`Adjusting concurrency: ${stats.currentLimit} -> ${newConcurrency}`);
+                    stats.currentLimit = newConcurrency;
+                    stats.lastAdjustTime = Date.now();
                     currentConcurrency = newConcurrency;
                     // Note: p-limit doesn't support dynamic adjustment, but we track it for future batches
                 }
