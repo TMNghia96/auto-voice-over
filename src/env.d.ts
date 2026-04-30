@@ -75,8 +75,8 @@ interface Window {
         saveTranslatedSrt: (projectPath: string, lang: string, content: string) => Promise<string | null>;
         getTranslatedSrt: (projectPath: string, lang: string) => Promise<string | null>;
 
-        generateAudio: (projectPath: string, lang: string) => void;
-        generateSingleAudio: (projectPath: string, lang: string, targetIndex: number) => Promise<boolean>;
+        generateAudio: (projectPath: string, lang: string, voiceId?: string) => void;
+        generateSingleAudio: (projectPath: string, lang: string, targetIndex: number, voiceId?: string) => Promise<boolean>;
         onAudioGenerateProgress: (callback: (progress: any) => void) => void;
         removeAudioGenerateListeners: () => void;
         listGeneratedAudio: (projectPath: string) => Promise<{ name: string; path: string }[]>;

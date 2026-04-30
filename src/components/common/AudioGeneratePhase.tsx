@@ -3,6 +3,9 @@ import { useState, useEffect, useRef } from "react";
 import { useParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
+import { VoiceSelector } from './VoiceSelector';
+import { VoiceModal } from './VoiceModal';
+import { getPresetsForLanguage } from '@/services/VoicePresets';
 import {
     Volume2,
     CheckCircle2,
@@ -50,6 +53,8 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
     const retryCountRef = useRef(0);
 
     const [error, setError] = useState<string | null>(null);
+    const [selectedVoiceId, setSelectedVoiceId] = useState<string>('');
+    const [showVoiceModal, setShowVoiceModal] = useState(false);
 
     useEffect(() => {
         setGlobalProcessing(isGenerating);
@@ -87,6 +92,11 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
                     const entries = parseSrt(foundContent);
                     setTranslatedEntries(entries);
                     setTranslatedLang(foundLang);
+
+                    const presets = getPresetsForLanguage(foundLang);
+                    if (presets.length > 0) {
+                        setSelectedVoiceId(presets[0].id);
+                    }
 
                     const existingAudio = await window.api.listGeneratedAudio(project.path);
                     if (existingAudio && existingAudio.length > 0) {
@@ -164,20 +174,20 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
         });
         setEntryStatuses(statuses);
         setAudioFiles([]);
-        window.api.generateAudio(projectPath, translatedLang);
+        window.api.generateAudio(projectPath, translatedLang, selectedVoiceId);
     };
 
     const processRetryQueue = async (indices: number[]) => {
         setIsGenerating(true);
         for (const idx of indices) {
-            await window.api.generateSingleAudio(projectPath, translatedLang, idx);
+            await window.api.generateSingleAudio(projectPath, translatedLang, idx, selectedVoiceId);
         }
     };
 
     const handleRetryGenerateItem = async (index: number) => {
         if (!projectPath || !translatedLang || isGenerating) return;
         setIsGenerating(true);
-        await window.api.generateSingleAudio(projectPath, translatedLang, index);
+        await window.api.generateSingleAudio(projectPath, translatedLang, index, selectedVoiceId);
     };
 
     const handlePlayAudio = async (index: number, audioPath: string) => {
@@ -290,6 +300,12 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
                         </div>
                     </div>
                     <div className="flex gap-2">
+                        <VoiceSelector
+                            selectedVoiceId={selectedVoiceId}
+                            language={translatedLang}
+                            onVoiceChange={setSelectedVoiceId}
+                            onShowAllVoices={() => setShowVoiceModal(true)}
+                        />
                         <Button
                             size="sm"
                             variant={hasAnyAudio ? "outline" : "default"}
@@ -418,6 +434,13 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
                     </div>
                 </div>
             </div>
+            <VoiceModal
+                    open={showVoiceModal}
+                    selectedVoiceId={selectedVoiceId}
+                    language={translatedLang}
+                    onSelectVoice={setSelectedVoiceId}
+                    onClose={() => setShowVoiceModal(false)}
+                />
         </TooltipProvider>
     );
 };
