@@ -103,7 +103,7 @@ export const setupAudioIpc = () => {
 
     ipcMain.on(
         "generate-audio",
-        async (event, projectPath: string, lang: string) => {
+        async (event, projectPath: string, lang: string, voiceId?: string) => {
             try {
                 const srtPath = path.join(projectPath, "translate", `${lang}.srt`);
                 if (!fs.existsSync(srtPath)) {
@@ -157,7 +157,8 @@ export const setupAudioIpc = () => {
                     (p) => {
                         event.sender.send("audio-generate-progress", p);
                     },
-                    1, // sequential
+                    5, // concurrency
+                    voiceId
                 );
 
                 const successCount = results.filter((r) => r !== "").length;
@@ -181,7 +182,7 @@ export const setupAudioIpc = () => {
 
     ipcMain.handle(
         "generate-single-audio",
-        async (event, projectPath: string, lang: string, targetIndex: number) => {
+        async (event, projectPath: string, lang: string, targetIndex: number, voiceId?: string) => {
             try {
                 const srtPath = path.join(projectPath, "translate", `${lang}.srt`);
                 if (!fs.existsSync(srtPath)) {
@@ -237,7 +238,8 @@ export const setupAudioIpc = () => {
                 const fileName = `${String(targetIndex).padStart(4, '0')}.mp3`;
                 const outputPath = path.join(outputDir, fileName);
 
-                const success = await generateAudioSegment(entry.text, VOICE_MAP[lang].voice, outputPath, entry);
+                const voiceName = voiceId || VOICE_MAP[lang].voice;
+                const success = await generateAudioSegment(entry.text, voiceName, outputPath, entry);
 
                 if (success) {
                     event.sender.send("audio-generate-progress", {
