@@ -155,7 +155,7 @@ export const generateAudioSegmentWithRetry = async (
 const adjustConcurrency = (stats: ConcurrencyStats): number => {
     const totalAttempts = stats.successCount + stats.failCount;
     
-    if (totalAttempts < 10) {
+    if (totalAttempts <= 10) {
         return stats.currentLimit; // Not enough data
     }
 
@@ -178,7 +178,8 @@ const generateAllAudioParallel = async (
     voiceName: string,
     outputDir: string,
     onProgress: (p: TTSProgress) => void,
-    initialConcurrency: number
+    initialConcurrency: number,
+    voiceId?: string
 ): Promise<string[]> => {
     const results: string[] = new Array(entries.length).fill('');
     const stats: ConcurrencyStats = {
@@ -255,19 +256,20 @@ export const generateAllAudio = async (
     langCode: string,
     outputDir: string,
     onProgress: (p: TTSProgress) => void,
-    concurrency = 1
+    concurrency = 1,
+    voiceId?: string
 ): Promise<string[]> => {
     ensureDir(outputDir);
 
-    const voice = VOICE_MAP[langCode];
-    if (!voice) {
+    const voiceName = voiceId || VOICE_MAP[langCode]?.voice;
+    if (!voiceName) {
         onProgress({ status: 'error', progress: 0, detail: `Không hỗ trợ ngôn ngữ: ${langCode}` });
         return [];
     }
 
     // Use parallel processing if concurrency > 1
     if (concurrency > 1) {
-        return generateAllAudioParallel(entries, voice.voice, outputDir, onProgress, concurrency);
+        return generateAllAudioParallel(entries, voiceName, outputDir, onProgress, concurrency, voiceId);
     }
 
     // Sequential fallback (concurrency = 1)
@@ -288,7 +290,7 @@ export const generateAllAudio = async (
             entryStatus: 'start',
         });
 
-        const success = await generateAudioSegment(entry.text, voice.voice, outputPath, entry);
+        const success = await generateAudioSegment(entry.text, voiceName, outputPath, entry);
 
         if (success) {
             results[i] = outputPath;
