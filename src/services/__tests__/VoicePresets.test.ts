@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { VOICE_PRESETS, ALL_VOICES, getVoiceById, getPresetsForLanguage } from '../VoicePresets';
+import { VOICE_PRESETS, ALL_VOICES, getVoiceById, getPresetsForLanguage, getAllVoicesForLanguage } from '../VoicePresets';
 
 describe('VoicePresets', () => {
   it('should have presets for all 11 languages', () => {
@@ -36,5 +36,12 @@ describe('VoicePresets', () => {
     const presets = getPresetsForLanguage('vi');
     expect(presets.length).toBeGreaterThanOrEqual(3);
     expect(presets.every(v => v.isPreset)).toBe(true);
+  });
+
+  it('should get all voices for language', () => {
+    const allVoices = getAllVoicesForLanguage('vi');
+    expect(allVoices.length).toBe(5);
+    expect(allVoices.filter(v => v.isPreset)).toHaveLength(3);
+    expect(allVoices.filter(v => !v.isPreset)).toHaveLength(2);
   });
 });
