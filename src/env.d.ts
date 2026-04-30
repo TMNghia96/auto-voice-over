@@ -116,5 +116,8 @@ interface Window {
         setDefaultBackgroundVolume: (volume: number) => Promise<boolean>;
         getDefaultFadeDuration: () => Promise<number>;
         setDefaultFadeDuration: (duration: number) => Promise<boolean>;
+
+        getVoicePreference: (projectPath: string, lang: string) => Promise<string | undefined>;
+        setVoicePreference: (projectPath: string, lang: string, voiceId: string) => Promise<{ success: boolean }>;
     };
 }

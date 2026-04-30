@@ -3,6 +3,7 @@ import { transcribeAudio, getExistingSrt } from "../services/TranscriptService";
 import { optimizeSrtFile, parseSrt as parseSrtMain } from "../lib/SrtOptimizer";
 
 import { generateAllAudio, generateAudioSegment, generateVoicePreview, cleanupOldPreviews, VOICE_MAP } from "../services/PiperService";
+import { getVoicePreference, setVoicePreference } from "../services/ProjectConfig";
 import fs from "fs";
 import path from "path";
 
@@ -358,6 +359,14 @@ export const setupAudioIpc = () => {
             }
         }
     );
+
+    ipcMain.handle("get-voice-preference", (_event, projectPath: string, lang: string) => {
+        return getVoicePreference(projectPath, lang);
+    });
+    ipcMain.handle("set-voice-preference", (_event, projectPath: string, lang: string, voiceId: string) => {
+        setVoicePreference(projectPath, lang, voiceId);
+        return { success: true };
+    });
 
     ipcMain.handle("cleanup-old-previews", (_event, projectPath: string) => {
         try {

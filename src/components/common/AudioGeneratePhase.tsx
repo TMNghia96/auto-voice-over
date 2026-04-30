@@ -62,6 +62,13 @@ const getEntryState = (index: number): EntryState => entryStatuses.get(index) ||
 
     const [error, setError] = useState<string | null>(null);
     const [selectedVoiceId, setSelectedVoiceId] = useState<string>('');
+
+    const handleVoiceChange = (voiceId: string) => {
+        setSelectedVoiceId(voiceId);
+        if (projectPath && translatedLang) {
+            window.api.setVoicePreference(projectPath, translatedLang, voiceId);
+        }
+    };
     const [showVoiceModal, setShowVoiceModal] = useState(false);
     const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
     const previewAudioRef = useRef<HTMLAudioElement[]>([]);
@@ -103,8 +110,11 @@ const getEntryState = (index: number): EntryState => entryStatuses.get(index) ||
                     setTranslatedEntries(entries);
                     setTranslatedLang(foundLang);
 
+                    const savedVoiceId = await window.api.getVoicePreference(project.path, foundLang);
                     const presets = getPresetsForLanguage(foundLang);
-                    if (presets.length > 0) {
+                    if (savedVoiceId && presets.some(p => p.id === savedVoiceId)) {
+                        setSelectedVoiceId(savedVoiceId);
+                    } else if (presets.length > 0) {
                         setSelectedVoiceId(presets[0].id);
                     }
 
@@ -346,7 +356,7 @@ const getEntryState = (index: number): EntryState => entryStatuses.get(index) ||
                         <VoiceSelector
                             selectedVoiceId={selectedVoiceId}
                             language={translatedLang}
-                            onVoiceChange={setSelectedVoiceId}
+                            onVoiceChange={handleVoiceChange}
                             onShowAllVoices={() => setShowVoiceModal(true)}
                             onPreview={() => handlePreviewVoice(selectedVoiceId)}
                             disabled={isGenerating || isPreviewPlaying}
@@ -514,7 +524,7 @@ const getEntryState = (index: number): EntryState => entryStatuses.get(index) ||
                     open={showVoiceModal}
                     selectedVoiceId={selectedVoiceId}
                     language={translatedLang}
-                    onSelectVoice={setSelectedVoiceId}
+                    onSelectVoice={handleVoiceChange}
                     onClose={() => setShowVoiceModal(false)}
                     onPreview={handlePreviewVoice}
                 />
