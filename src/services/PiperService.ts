@@ -404,6 +404,70 @@ const generateAllAudioParallel = async (
     });
 
     await Promise.all(tasks);
+
+    // Auto-retry failed entries up to 2 rounds
+    let maxRetryRounds = 2;
+    for (let round = 0; round < maxRetryRounds; round++) {
+        const failedEntries: SrtEntryParams[] = [];
+        const failedIndices: number[] = [];
+
+        entries.forEach((entry, i) => {
+            if (results[i] === '') {
+                failedEntries.push(entry);
+                failedIndices.push(i);
+            }
+        });
+
+        if (failedEntries.length === 0) break;
+
+        onProgress({
+            status: 'generating',
+            progress: Math.round((completed / entries.length) * 100),
+            detail: `Đang thử lại các đoạn lỗi (lần ${round + 1}/${maxRetryRounds})...`,
+        });
+
+        const retryLimit = pLimit(currentConcurrency);
+        const retryTasks = failedEntries.map((entry) =>
+            retryLimit(async () => {
+                const i = entries.indexOf(entry);
+                const outputPath = path.join(outputDir, `${String(entry.index).padStart(4, '0')}.mp3`);
+
+                const result = await generateAudioSegmentWithRetry(
+                    entry.text, voiceName, outputPath, entry, 2
+                );
+
+                if (result.success && fs.existsSync(outputPath)) {
+                    results[i] = outputPath;
+                    completed++;
+                    stats.successCount++;
+                } else {
+                    stats.failCount++;
+                }
+
+                onProgress({
+                    status: 'generating',
+                    progress: Math.round((completed / entries.length) * 100),
+                    detail: `Đang thử lại... ${completed}/${entries.length}`,
+                    current: completed,
+                    total: entries.length,
+                    entryIndex: entry.index,
+                    entryStatus: (result.success && fs.existsSync(outputPath)) ? 'done' : 'failed',
+                });
+            })
+        );
+
+        await Promise.all(retryTasks);
+    }
+
+    const finalSuccessCount = results.filter(r => r !== '').length;
+    onProgress({
+        status: 'done',
+        progress: 100,
+        detail: `Hoàn tất! ${finalSuccessCount}/${entries.length} audio đã được tạo.`,
+        current: finalSuccessCount,
+        total: entries.length,
+    });
+
     return results;
 };
 

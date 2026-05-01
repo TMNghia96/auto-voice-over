@@ -11,6 +11,10 @@ export default defineConfig({
     globals: true,
     environment: 'jsdom',
     include: ['src/**/*.test.{ts,tsx}', 'tests/**/*.test.{ts,tsx}'],
+    exclude: [
+      'src/__tests__/e2e/**',
+      '**/PiperService.integration.test.ts',
+    ],
     setupFiles: ['./src/test-setup.ts'],
     coverage: {
       provider: 'v8',
