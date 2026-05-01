@@ -128,11 +128,11 @@ export const generateAudioSegment = async (
                             done(true);
                         } else {
                             fs.unlinkSync(outputPath);
-                            done(true);
+                            done(false);
                         }
                     } else {
                         if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-                        done(true);
+                        done(false);
                     }
                 });
             });
@@ -182,7 +182,7 @@ export const generateAudioSegmentWithRetry = async (
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
         try {
             const success = await _internal.generateAudioSegment(text, voiceName, outputPath, entry);
-            if (success) {
+            if (success && fs.existsSync(outputPath)) {
                 return { success: true };
             }
         } catch (err) {
