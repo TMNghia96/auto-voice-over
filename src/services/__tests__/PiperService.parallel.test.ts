@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import fs from 'fs';
 import { generateAllAudio, _internal, generateVoicePreview } from '../PiperService';
 import type { SrtEntryParams } from '../PiperService';
 
@@ -6,7 +7,8 @@ describe('PiperService - Parallel Processing', () => {
     it('should generate audio faster with parallel processing than sequential', async () => {
         // Mock _internal.generateAudioSegment to simulate realistic delay
         const mockGenerateAudioSegment = vi.spyOn(_internal, 'generateAudioSegment');
-        mockGenerateAudioSegment.mockImplementation(async () => {
+        mockGenerateAudioSegment.mockImplementation(async (_text, _voice, outputPath) => {
+            fs.writeFileSync(outputPath, 'fake-audio-data');
             await new Promise(resolve => setTimeout(resolve, 100)); // 100ms per segment
             return true;
         });
@@ -45,9 +47,10 @@ describe('PiperService - Parallel Processing', () => {
 
         // Mock _internal.generateAudioSegment to track concurrency
         const mockGenerateAudioSegment = vi.spyOn(_internal, 'generateAudioSegment');
-        mockGenerateAudioSegment.mockImplementation(async () => {
+        mockGenerateAudioSegment.mockImplementation(async (_text, _voice, outputPath) => {
             activeCalls++;
             maxConcurrent = Math.max(maxConcurrent, activeCalls);
+            fs.writeFileSync(outputPath, 'fake-audio-data');
             await new Promise(resolve => setTimeout(resolve, 100));
             activeCalls--;
             return true;

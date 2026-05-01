@@ -397,6 +397,7 @@ const generateAllAudioParallel = async (
                     stats.currentLimit = newConcurrency;
                     stats.lastAdjustTime = Date.now();
                     currentConcurrency = newConcurrency;
+                    (limit as any).concurrency = newConcurrency;
                 }
             }
         });
