@@ -161,7 +161,7 @@ export const setupAudioIpc = () => {
                     (p) => {
                         event.sender.send("audio-generate-progress", p);
                     },
-                    5,
+                    1,
                     voiceId,
                     abortController.signal
                 );
@@ -371,7 +371,7 @@ export const setupAudioIpc = () => {
                     fs.mkdirSync(outputDir, { recursive: true });
                 }
                 const results = await generateAllAudio(
-                    failedEntries, lang, outputDir, (p) => { event.sender.send("audio-generate-progress", p); }, 5, voiceId
+                    failedEntries, lang, outputDir, (p) => { event.sender.send("audio-generate-progress", p); }, 1, voiceId
                 );
                 const successCount = results.filter((r) => r !== "").length;
                 return { success: true, successCount, totalCount: failedEntries.length };
