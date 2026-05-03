@@ -4,6 +4,8 @@ import fs from 'fs';
 import * as PiperService from '../PiperService';
 import type { SrtEntryParams } from '../PiperService';
 
+const engine = PiperService.engine;
+
 const TEST_DIR = path.join(__dirname, '..', '..', '..', 'test-output', 'integration');
 
 describe('PiperService - Integration', () => {
@@ -21,7 +23,7 @@ describe('PiperService - Integration', () => {
     });
 
     it('should generate audio for multiple entries in parallel', async () => {
-        const mockGen = vi.spyOn(PiperService._internal, 'generateAudioSegment');
+        const mockGen = vi.spyOn(engine, 'synthesizeToFile');
         mockGen.mockImplementation(async (_text: string, _voice: string, outputPath: string) => {
             await new Promise(resolve => setTimeout(resolve, 50));
             fs.mkdirSync(path.dirname(outputPath), { recursive: true });
@@ -47,7 +49,7 @@ describe('PiperService - Integration', () => {
     }, 10000);
 
     it('should generate and cache voice previews', async () => {
-        const mockGen = vi.spyOn(PiperService._internal, 'generateAudioSegment');
+        const mockGen = vi.spyOn(engine, 'synthesizeToFile');
         mockGen.mockImplementation(async (_text: string, _voice: string, outputPath: string) => {
             await new Promise(resolve => setTimeout(resolve, 100));
             fs.mkdirSync(path.dirname(outputPath), { recursive: true });

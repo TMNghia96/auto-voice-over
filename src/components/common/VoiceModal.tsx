@@ -3,7 +3,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Volume2, Search } from 'lucide-react';
-import { getAllVoicesForLanguage, type VoiceOption } from '@/services/VoicePresets';
+import { getAllVoicesForLanguage, type VoiceOption } from '@/services/tts/VoiceCatalog';
 
 interface VoiceModalProps {
   language: string;

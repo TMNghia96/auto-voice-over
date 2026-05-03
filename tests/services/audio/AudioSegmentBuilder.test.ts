@@ -2,11 +2,46 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { AudioSegmentBuilder } from '../../../src/services/audio/AudioSegmentBuilder';
 import fs from 'fs';
 import path from 'path';
-import { spawn } from 'child_process';
 
-vi.mock('child_process');
-vi.mock('../../../src/services/EnvironmentService', () => ({
-  getFfmpegPath: () => 'ffmpeg'
+const childMock = vi.hoisted(() => {
+  const durationRef = { value: '00:00:00.000' };
+  const spawnFn = vi.fn(() => ({
+    stderr: {
+      on: (event: string, callback: Function) => {
+        if (event === 'data') {
+          callback(Buffer.from(`Duration: ${durationRef.value}`));
+        }
+      }
+    },
+    on: (event: string, callback: Function) => {
+      if (event === 'close') {
+        callback(0);
+      }
+    },
+    stdout: { on: () => {} },
+  }));
+  return { spawnFn, durationRef };
+});
+
+const mockSpawn = childMock.spawnFn;
+const mockDurationStr = childMock.durationRef;
+
+vi.mock(import('child_process'), async (importOriginal) => ({
+  ...(await importOriginal()),
+  spawn: childMock.spawnFn,
+}));
+
+vi.mock('child_process', () => ({
+  spawn: mockSpawn,
+  default: {},
+}));
+
+vi.mock('electron', () => ({
+  app: {
+    isPackaged: true,
+    getPath: () => '',
+  },
+  default: {},
 }));
 
 describe('AudioSegmentBuilder', () => {
@@ -16,6 +51,7 @@ describe('AudioSegmentBuilder', () => {
   beforeEach(() => {
     builder = new AudioSegmentBuilder();
     testProjectPath = path.join(__dirname, 'test-project');
+    mockDurationStr.value = '00:00:00.000';
     
     // Create test directory structure
     fs.mkdirSync(testProjectPath, { recursive: true });
@@ -63,24 +99,7 @@ Second subtitle
       fs.writeFileSync(srtPath, srtContent);
 
       // Mock FFmpeg spawn for getMediaDuration
-      const mockSpawn = vi.mocked(spawn);
-      mockSpawn.mockImplementation((() => {
-        const mockProc: any = {
-          stderr: {
-            on: (event: string, callback: Function) => {
-              if (event === 'data') {
-                callback(Buffer.from('Duration: 00:00:03.500'));
-              }
-            }
-          },
-          on: (event: string, callback: Function) => {
-            if (event === 'close') {
-              callback(0);
-            }
-          }
-        };
-        return mockProc;
-      }) as any);
+      mockDurationStr.value = '00:00:03.500';
 
       const segments = await builder.buildSegmentMap(testProjectPath, 20);
 
@@ -123,24 +142,7 @@ Test subtitle
       fs.writeFileSync(audioPath, 'dummy audio');
 
       // Mock FFmpeg to return audio duration of 6s (ratio = 6/5 = 1.2)
-      const mockSpawn = vi.mocked(spawn);
-      mockSpawn.mockImplementation((() => {
-        const mockProc: any = {
-          stderr: {
-            on: (event: string, callback: Function) => {
-              if (event === 'data') {
-                callback(Buffer.from('Duration: 00:00:06.000'));
-              }
-            }
-          },
-          on: (event: string, callback: Function) => {
-            if (event === 'close') {
-              callback(0);
-            }
-          }
-        };
-        return mockProc;
-      }) as any);
+      mockDurationStr.value = '00:00:06.000';
 
       const segments = await builder.buildSegmentMap(testProjectPath, 10);
 
@@ -164,24 +166,7 @@ Test subtitle
       fs.writeFileSync(audioPath, 'dummy audio');
 
       // Mock FFmpeg to return audio duration of 8s (ratio = 8/5 = 1.6 > 1.4)
-      const mockSpawn = vi.mocked(spawn);
-      mockSpawn.mockImplementation((() => {
-        const mockProc: any = {
-          stderr: {
-            on: (event: string, callback: Function) => {
-              if (event === 'data') {
-                callback(Buffer.from('Duration: 00:00:08.000'));
-              }
-            }
-          },
-          on: (event: string, callback: Function) => {
-            if (event === 'close') {
-              callback(0);
-            }
-          }
-        };
-        return mockProc;
-      }) as any);
+      mockDurationStr.value = '00:00:08.000';
 
       const segments = await builder.buildSegmentMap(testProjectPath, 10);
 
@@ -205,24 +190,7 @@ Test subtitle
       fs.writeFileSync(audioPath, 'dummy audio');
 
       // Mock FFmpeg to return audio duration of 3s (ratio = 3/5 = 0.6 < 1.0)
-      const mockSpawn = vi.mocked(spawn);
-      mockSpawn.mockImplementation((() => {
-        const mockProc: any = {
-          stderr: {
-            on: (event: string, callback: Function) => {
-              if (event === 'data') {
-                callback(Buffer.from('Duration: 00:00:03.000'));
-              }
-            }
-          },
-          on: (event: string, callback: Function) => {
-            if (event === 'close') {
-              callback(0);
-            }
-          }
-        };
-        return mockProc;
-      }) as any);
+      mockDurationStr.value = '00:00:03.000';
 
       const segments = await builder.buildSegmentMap(testProjectPath, 10);
 
@@ -245,24 +213,7 @@ Second subtitle
 `;
       fs.writeFileSync(srtPath, srtContent);
 
-      const mockSpawn = vi.mocked(spawn);
-      mockSpawn.mockImplementation((() => {
-        const mockProc: any = {
-          stderr: {
-            on: (event: string, callback: Function) => {
-              if (event === 'data') {
-                callback(Buffer.from('Duration: 00:00:03.000'));
-              }
-            }
-          },
-          on: (event: string, callback: Function) => {
-            if (event === 'close') {
-              callback(0);
-            }
-          }
-        };
-        return mockProc;
-      }) as any);
+      mockDurationStr.value = '00:00:03.000';
 
       const segments = await builder.buildSegmentMap(testProjectPath, 20);
 
@@ -295,24 +246,7 @@ Valid segment
 `;
       fs.writeFileSync(srtPath, srtContent);
 
-      const mockSpawn = vi.mocked(spawn);
-      mockSpawn.mockImplementation((() => {
-        const mockProc: any = {
-          stderr: {
-            on: (event: string, callback: Function) => {
-              if (event === 'data') {
-                callback(Buffer.from('Duration: 00:00:03.000'));
-              }
-            }
-          },
-          on: (event: string, callback: Function) => {
-            if (event === 'close') {
-              callback(0);
-            }
-          }
-        };
-        return mockProc;
-      }) as any);
+      mockDurationStr.value = '00:00:03.000';
 
       const segments = await builder.buildSegmentMap(testProjectPath, 20);
 

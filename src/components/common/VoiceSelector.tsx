@@ -7,7 +7,7 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
-import { getPresetsForLanguage } from '@/services/VoicePresets';
+import { getPresetsForLanguage } from '@/services/tts/VoiceCatalog';
 
 export interface VoiceSelectorProps {
   language: string;

@@ -84,6 +84,8 @@ export class AudioSegmentBuilder {
           targetDuration: entryStart - prevEnd,
           audioSpeed: 1.0,
           videoSpeed: 1.0,
+          fadeStart: i !== 0,
+          fadeEnd: true,
         });
       }
 
@@ -165,6 +167,8 @@ export class AudioSegmentBuilder {
           targetDuration: videoDuration - lastEnd,
           audioSpeed: 1.0,
           videoSpeed: 1.0,
+          fadeStart: true,
+          fadeEnd: false,
         });
       }
     }

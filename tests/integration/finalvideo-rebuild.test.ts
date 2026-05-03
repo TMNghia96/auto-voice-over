@@ -7,11 +7,14 @@ import { EncoderFactory } from '../../src/services/video/encoders/EncoderFactory
 import { Segment, ValidatedSegment } from '../../src/services/video/types';
 
 // Mock child_process for FFmpeg operations
-vi.mock('child_process', () => ({
-  spawn: vi.fn(),
-  exec: vi.fn(),
-  execFile: vi.fn(),
-}));
+vi.mock(import('child_process'), async (importOriginal) => {
+  return {
+    ...(await importOriginal()),
+    spawn: vi.fn(),
+    exec: vi.fn(),
+    execFile: vi.fn(),
+  };
+});
 
 vi.mock('../../src/services/EnvironmentService', () => ({
   getFfmpegPath: vi.fn(() => 'ffmpeg'),

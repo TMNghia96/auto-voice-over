@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
 import path from 'path';
-import { generateAllAudio, _internal } from '../PiperService';
+import { generateAllAudio, engine } from '../PiperService';
 import type { SrtEntryParams } from '../PiperService';
 
 const BENCHMARK_DIR = path.join(__dirname, '..', '..', '..', 'test-output', 'benchmark');
@@ -21,8 +21,8 @@ describe('PiperService - Performance Benchmarks', () => {
     });
 
     it('should generate 20 entries faster with parallel processing', async () => {
-        const mockGenerateAudioSegment = vi.spyOn(_internal, 'generateAudioSegment');
-        mockGenerateAudioSegment.mockImplementation(async (_text: string, _voice: string, outputPath: string) => {
+        const mockSynthesize = vi.spyOn(engine, 'synthesizeToFile');
+        mockSynthesize.mockImplementation(async (_text: string, _voice: string, outputPath: string) => {
             await new Promise(resolve => setTimeout(resolve, 100));
             fs.writeFileSync(outputPath, 'fake-benchmark-audio');
             return true;
@@ -49,6 +49,6 @@ describe('PiperService - Performance Benchmarks', () => {
 
         expect(parallelTime).toBeLessThan(sequentialTime / 2);
 
-        mockGenerateAudioSegment.mockRestore();
+        mockSynthesize.mockRestore();
     }, 30000);
 });

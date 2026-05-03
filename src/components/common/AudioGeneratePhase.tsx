@@ -5,7 +5,8 @@ import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
 import { VoiceSelector } from './VoiceSelector';
 import { VoiceModal } from './VoiceModal';
-import { getPresetsForLanguage } from '@/services/VoicePresets';
+import { getPresetsForLanguage } from '@/services/tts/VoiceCatalog';
+import { AudioPlaybackService } from '@/services/AudioPlaybackService';
 import {
     Volume2,
     CheckCircle2,
@@ -54,7 +55,7 @@ export const AudioGeneratePhase = ({ onComplete }: { onComplete?: () => void }) 
 
 const getEntryState = (index: number): EntryState => entryStatuses.get(index) || { status: 'pending', attempts: 0 };
     const [playingIndex, setPlayingIndex] = useState<number | null>(null);
-    const audioRef = useRef<HTMLAudioElement | null>(null);
+    const playbackRef = useRef(new AudioPlaybackService());
 
     const { setIsProcessing: setGlobalProcessing } = useProcessContext();
 
@@ -71,6 +72,7 @@ const getEntryState = (index: number): EntryState => entryStatuses.get(index) ||
     };
     const [showVoiceModal, setShowVoiceModal] = useState(false);
     const [isPreviewPlaying, setIsPreviewPlaying] = useState(false);
+    const [concurrency, setConcurrency] = useState(10);
     const previewAudioRef = useRef<HTMLAudioElement[]>([]);
 
     useEffect(() => {
@@ -116,6 +118,11 @@ const getEntryState = (index: number): EntryState => entryStatuses.get(index) ||
                         setSelectedVoiceId(savedVoiceId);
                     } else if (presets.length > 0) {
                         setSelectedVoiceId(presets[0].id);
+                    }
+
+                    const savedConcurrency = await window.api.getConcurrencySettings(project.path);
+                    if (savedConcurrency?.initial) {
+                        setConcurrency(savedConcurrency.initial);
                     }
 
                     const existingAudio = await window.api.listGeneratedAudio(project.path);
@@ -212,16 +219,15 @@ const getEntryState = (index: number): EntryState => entryStatuses.get(index) ||
     };
 
     const handlePlayAudio = async (index: number, audioPath: string) => {
-        if (audioRef.current) {
-            audioRef.current.pause();
-            audioRef.current = null;
-        }
+        const playback = playbackRef.current;
 
-        if (playingIndex === index) {
+        if (playback.isPlaying && playingIndex === index) {
+            playback.stop();
             setPlayingIndex(null);
             return;
         }
 
+        playback.stop();
         setPlayingIndex(index);
         try {
             const dataUrl = await window.api.readGeneratedAudio(audioPath);
@@ -229,20 +235,10 @@ const getEntryState = (index: number): EntryState => entryStatuses.get(index) ||
                 setPlayingIndex(null);
                 return;
             }
-            const audio = new Audio(dataUrl);
-            audioRef.current = audio;
-            audio.onended = () => {
-                setPlayingIndex(null);
-                audioRef.current = null;
-            };
-            audio.onerror = () => {
-                setPlayingIndex(null);
-                audioRef.current = null;
-            };
-            await audio.play();
+            await playback.play(dataUrl);
+            setPlayingIndex(null);
         } catch {
             setPlayingIndex(null);
-            audioRef.current = null;
         }
     };
 
@@ -361,6 +357,32 @@ const getEntryState = (index: number): EntryState => entryStatuses.get(index) ||
                             onPreview={() => handlePreviewVoice(selectedVoiceId)}
                             disabled={isGenerating || isPreviewPlaying}
                         />
+                        <Tooltip delayDuration={300}>
+                            <TooltipTrigger asChild>
+                                <div className="flex items-center gap-1.5 bg-muted/50 rounded-md px-2 py-1">
+                                    <span className="text-[10px] text-muted-foreground whitespace-nowrap">Luồng</span>
+                                    <input
+                                        type="range"
+                                        min={1}
+                                        max={20}
+                                        value={concurrency}
+                                        onChange={(e) => {
+                                            const v = Number(e.target.value);
+                                            setConcurrency(v);
+                                            if (projectPath) {
+                                                window.api.setConcurrencySettings(projectPath, { initial: v, min: 1, max: 20 });
+                                            }
+                                        }}
+                                        disabled={isGenerating}
+                                        className="w-16 h-3 accent-primary cursor-pointer"
+                                    />
+                                    <span className="text-[10px] font-mono w-4 text-right">{concurrency}</span>
+                                </div>
+                            </TooltipTrigger>
+                            <TooltipContent side="bottom">
+                                <p>Số luồng tạo song song (1-20)</p>
+                            </TooltipContent>
+                        </Tooltip>
                         {isGenerating && progress ? (
                             <Button
                                 size="sm"

@@ -120,5 +120,7 @@ interface Window {
 
         getVoicePreference: (projectPath: string, lang: string) => Promise<string | undefined>;
         setVoicePreference: (projectPath: string, lang: string, voiceId: string) => Promise<{ success: boolean }>;
+        getConcurrencySettings: (projectPath: string) => Promise<{ initial: number; min: number; max: number } | undefined>;
+        setConcurrencySettings: (projectPath: string, settings: { initial: number; min: number; max: number }) => Promise<{ success: boolean }>;
     };
 }
