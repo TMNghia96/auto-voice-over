@@ -2,8 +2,11 @@ import { ipcMain } from "electron";
 import { transcribeAudio, getExistingSrt } from "../services/TranscriptService";
 import { optimizeSrtFile, parseSrt as parseSrtMain } from "../lib/SrtOptimizer";
 
-import { generateAllAudio, generateAudioSegment, generateVoicePreview, cleanupOldPreviews, VOICE_MAP } from "../services/PiperService";
-import { getVoicePreference, setVoicePreference } from "../services/ProjectConfig";
+import { generateAllAudio, generateAudioSegment, generateVoicePreview, cleanupOldPreviews } from "../services/PiperService";
+import { resolveVoiceName, isLanguageSupported } from "../services/tts/VoiceCatalog";
+import { TtsOutputManager } from "../services/tts/TtsOutputManager";
+import { SrtRepository } from "../services/tts/SrtRepository";
+import { getVoicePreference, setVoicePreference, loadProjectConfig, saveProjectConfig } from "../services/ProjectConfig";
 import fs from "fs";
 import path from "path";
 
@@ -42,13 +45,8 @@ export const setupAudioIpc = () => {
         "save-translated-srt",
         (_event, projectPath: string, lang: string, content: string) => {
             try {
-                const translateDir = path.join(projectPath, "translate");
-                if (!fs.existsSync(translateDir)) {
-                    fs.mkdirSync(translateDir, { recursive: true });
-                }
-                const filePath = path.join(translateDir, `${lang}.srt`);
-                fs.writeFileSync(filePath, content, "utf-8");
-                return filePath;
+                const repo = new SrtRepository(projectPath);
+                return repo.save(lang, content);
             } catch (error) {
                 console.error("Failed to save translated SRT:", error);
                 return null;
@@ -59,16 +57,8 @@ export const setupAudioIpc = () => {
     ipcMain.handle(
         "get-translated-srt",
         (_event, projectPath: string, lang: string) => {
-            try {
-                const srtPath = path.join(projectPath, "translate", `${lang}.srt`);
-                if (fs.existsSync(srtPath)) {
-                    const content = fs.readFileSync(srtPath, "utf-8");
-                    return content;
-                }
-            } catch (error) {
-                console.error("Failed to get translated SRT:", error);
-            }
-            return null;
+            const repo = new SrtRepository(projectPath);
+            return repo.load(lang);
         },
     );
 
@@ -109,8 +99,9 @@ export const setupAudioIpc = () => {
         async (event, projectPath: string, lang: string, voiceId?: string) => {
             abortController = new AbortController();
             try {
-                const srtPath = path.join(projectPath, "translate", `${lang}.srt`);
-                if (!fs.existsSync(srtPath)) {
+                const repo = new SrtRepository(projectPath);
+                const srtContent = repo.load(lang);
+                if (!srtContent) {
                     event.sender.send("audio-generate-progress", {
                         status: "error",
                         progress: 0,
@@ -119,7 +110,6 @@ export const setupAudioIpc = () => {
                     return;
                 }
 
-                const srtContent = fs.readFileSync(srtPath, "utf-8");
                 const entries = parseSrtMain(srtContent);
 
                 if (entries.length === 0) {
@@ -131,7 +121,7 @@ export const setupAudioIpc = () => {
                     return;
                 }
 
-                if (!VOICE_MAP[lang]) {
+                if (!isLanguageSupported(lang)) {
                     event.sender.send("audio-generate-progress", {
                         status: "error",
                         progress: 0,
@@ -140,29 +130,22 @@ export const setupAudioIpc = () => {
                     return;
                 }
 
-                const outputDir = path.join(projectPath, "audio_gene");
-                if (fs.existsSync(outputDir)) {
-                    const oldFiles = fs
-                        .readdirSync(outputDir)
-                        .filter((f) => f.endsWith(".mp3") || f.endsWith(".wav"));
-                    for (const f of oldFiles) {
-                        try {
-                            fs.unlinkSync(path.join(outputDir, f));
-                        } catch (cleanupError) {
-                            console.warn(`Không thể xóa file cũ ${f}:`, cleanupError);
-                        }
-                    }
-                }
+                const outManager = new TtsOutputManager(projectPath);
+                outManager.clearSegments();
+                outManager.ensureExists();
 
+                const voiceName = resolveVoiceName(lang, voiceId)!;
+                const config = loadProjectConfig(projectPath);
+                const concurrency = config.concurrencySettings?.initial ?? 10;
                 const results = await generateAllAudio(
-                    entries,
+                    entries.map((e: { index: number; text: string }) => ({ index: e.index, text: e.text })),
                     lang,
-                    outputDir,
+                    outManager.dir,
                     (p) => {
                         event.sender.send("audio-generate-progress", p);
                     },
-                    1,
-                    voiceId,
+                    concurrency,
+                    voiceId || undefined,
                     abortController.signal
                 );
 
@@ -207,8 +190,9 @@ export const setupAudioIpc = () => {
         "generate-single-audio",
         async (event, projectPath: string, lang: string, targetIndex: number, voiceId?: string) => {
             try {
-                const srtPath = path.join(projectPath, "translate", `${lang}.srt`);
-                if (!fs.existsSync(srtPath)) {
+                const repo = new SrtRepository(projectPath);
+                const srtContent = repo.load(lang);
+                if (!srtContent) {
                     event.sender.send("audio-generate-progress", {
                         status: "error",
                         progress: 0,
@@ -219,9 +203,8 @@ export const setupAudioIpc = () => {
                     return false;
                 }
 
-                const srtContent = fs.readFileSync(srtPath, "utf-8");
                 const entries = parseSrtMain(srtContent);
-                const entry = entries.find(e => e.index === targetIndex);
+                const entry = entries.find((e: { index: number }) => e.index === targetIndex);
 
                 if (!entry) {
                     event.sender.send("audio-generate-progress", {
@@ -234,7 +217,7 @@ export const setupAudioIpc = () => {
                     return false;
                 }
 
-                if (!VOICE_MAP[lang]) {
+                if (!isLanguageSupported(lang)) {
                     event.sender.send("audio-generate-progress", {
                         status: "error",
                         progress: 0,
@@ -253,16 +236,12 @@ export const setupAudioIpc = () => {
                     entryStatus: "start"
                 });
 
-                const outputDir = path.join(projectPath, "audio_gene");
-                if (!fs.existsSync(outputDir)) {
-                    fs.mkdirSync(outputDir, { recursive: true });
-                }
+                const outManager = new TtsOutputManager(projectPath);
+                outManager.ensureExists();
 
-                const fileName = `${String(targetIndex).padStart(4, '0')}.mp3`;
-                const outputPath = path.join(outputDir, fileName);
-
-                const voiceName = voiceId || VOICE_MAP[lang].voice;
-                const success = await generateAudioSegment(entry.text, voiceName, outputPath, entry);
+                const outputPath = outManager.segmentPath(targetIndex);
+                const voiceName = resolveVoiceName(lang, voiceId)!;
+                const success = await generateAudioSegment(entry.text, voiceName, outputPath);
 
                 if (success) {
                     event.sender.send("audio-generate-progress", {
@@ -276,7 +255,7 @@ export const setupAudioIpc = () => {
                 } else {
                     event.sender.send("audio-generate-progress", {
                         status: "error",
-                        progress: 100, // Done but failed
+                        progress: 100,
                         detail: `Tạo đoạn ${targetIndex} thất bại`,
                         entryIndex: targetIndex,
                         entryStatus: "failed"
@@ -298,47 +277,24 @@ export const setupAudioIpc = () => {
     );
 
     ipcMain.handle("list-generated-audio", (_event, projectPath: string) => {
-        try {
-            const audioDir = path.join(projectPath, "audio_gene");
-            if (!fs.existsSync(audioDir)) return [];
-            const files = fs
-                .readdirSync(audioDir)
-                .filter((f) => f.endsWith(".mp3") || f.endsWith(".wav"))
-                .sort();
-            return files.map((f) => ({
-                name: f,
-                path: path.join(audioDir, f),
-            }));
-        } catch {
-            return [];
-        }
+        const outManager = new TtsOutputManager(projectPath);
+        return outManager.listSegments();
     });
 
     ipcMain.handle("read-generated-audio", (_event, filePath: string) => {
-        try {
-            if (!fs.existsSync(filePath)) return null;
-            const buffer = fs.readFileSync(filePath);
-            const ext = path.extname(filePath).toLowerCase();
-            const mime =
-                ext === ".mp3" ? "audio/mpeg"
-                    : ext === ".wav" ? "audio/wav"
-                        : "audio/mpeg";
-            const base64 = buffer.toString("base64");
-            return `data:${mime};base64,${base64}`;
-        } catch {
-            return null;
-        }
+        const outManager = new TtsOutputManager(path.dirname(filePath));
+        return outManager.readSegment(filePath);
     });
 
     ipcMain.handle(
         "generate-voice-preview",
         async (_event, projectPath: string, lang: string, voiceId: string) => {
             try {
-                const srtPath = path.join(projectPath, "translate", `${lang}.srt`);
-                if (!fs.existsSync(srtPath)) {
+                const repo = new SrtRepository(projectPath);
+                const srtContent = repo.load(lang);
+                if (!srtContent) {
                     return { error: "Không tìm thấy file SRT đã dịch!" };
                 }
-                const srtContent = fs.readFileSync(srtPath, "utf-8");
                 const entries = parseSrtMain(srtContent);
                 if (entries.length < 5) {
                     return { error: "Cần ít nhất 5 đoạn phụ đề để tạo preview" };
@@ -356,22 +312,27 @@ export const setupAudioIpc = () => {
         "retry-failed-audio",
         async (event, projectPath: string, lang: string, failedIndices: number[], voiceId?: string) => {
             try {
-                const srtPath = path.join(projectPath, "translate", `${lang}.srt`);
-                if (!fs.existsSync(srtPath)) {
+                const repo = new SrtRepository(projectPath);
+                const srtContent = repo.load(lang);
+                if (!srtContent) {
                     return { success: false, error: "Không tìm thấy file SRT đã dịch!" };
                 }
-                const srtContent = fs.readFileSync(srtPath, "utf-8");
                 const entries = parseSrtMain(srtContent);
-                const failedEntries = entries.filter(e => failedIndices.includes(e.index));
+                const failedEntries = entries.filter((e: { index: number }) => failedIndices.includes(e.index));
                 if (failedEntries.length === 0) {
                     return { success: false, error: "Không có đoạn nào cần tạo lại" };
                 }
-                const outputDir = path.join(projectPath, "audio_gene");
-                if (!fs.existsSync(outputDir)) {
-                    fs.mkdirSync(outputDir, { recursive: true });
-                }
+                const outManager = new TtsOutputManager(projectPath);
+                outManager.ensureExists();
+                const config = loadProjectConfig(projectPath);
+                const concurrency = config.concurrencySettings?.initial ?? 10;
                 const results = await generateAllAudio(
-                    failedEntries, lang, outputDir, (p) => { event.sender.send("audio-generate-progress", p); }, 1, voiceId
+                    failedEntries.map((e: { index: number; text: string }) => ({ index: e.index, text: e.text })),
+                    lang,
+                    outManager.dir,
+                    (p) => { event.sender.send("audio-generate-progress", p); },
+                    concurrency,
+                    voiceId
                 );
                 const successCount = results.filter((r) => r !== "").length;
                 return { success: true, successCount, totalCount: failedEntries.length };
@@ -392,11 +353,23 @@ export const setupAudioIpc = () => {
 
     ipcMain.handle("cleanup-old-previews", (_event, projectPath: string) => {
         try {
-            cleanupOldPreviews();
+            cleanupOldPreviews(projectPath);
             return { success: true };
         } catch (err) {
             console.error("Preview cleanup failed:", err);
             return { error: `Lỗi: ${err}` };
         }
+    });
+
+    ipcMain.handle("get-concurrency-settings", (_event, projectPath: string) => {
+        const config = loadProjectConfig(projectPath);
+        return config.concurrencySettings ?? { initial: 10, min: 1, max: 20 };
+    });
+
+    ipcMain.handle("set-concurrency-settings", (_event, projectPath: string, settings: { initial: number; min: number; max: number }) => {
+        const config = loadProjectConfig(projectPath);
+        config.concurrencySettings = settings;
+        saveProjectConfig(projectPath, config);
+        return { success: true };
     });
 };

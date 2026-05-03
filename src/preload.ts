@@ -89,6 +89,8 @@ contextBridge.exposeInMainWorld('api', {
     cleanupOldPreviews: (projectPath: string) => ipcRenderer.invoke('cleanup-old-previews', projectPath),
     getVoicePreference: (projectPath: string, lang: string) => ipcRenderer.invoke('get-voice-preference', projectPath, lang),
     setVoicePreference: (projectPath: string, lang: string, voiceId: string) => ipcRenderer.invoke('set-voice-preference', projectPath, lang, voiceId),
+    getConcurrencySettings: (projectPath: string) => ipcRenderer.invoke('get-concurrency-settings', projectPath),
+    setConcurrencySettings: (projectPath: string, settings: { initial: number; min: number; max: number }) => ipcRenderer.invoke('set-concurrency-settings', projectPath, settings),
 
     readGeneratedAudio: (filePath: string) => ipcRenderer.invoke('read-generated-audio', filePath),
     readVideoFile: (filePath: string) => ipcRenderer.invoke('read-video-file', filePath),
