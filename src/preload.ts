@@ -24,7 +24,8 @@ contextBridge.exposeInMainWorld('api', {
     saveProjectMetadata: (projectPath: string, metadata: any) => ipcRenderer.invoke('save-project-metadata', projectPath, metadata),
     resetProjectData: (projectPath: string) => ipcRenderer.invoke('reset-project-data', projectPath),
     getVideoInfo: (url: string) => ipcRenderer.invoke('get-video-info', url),
-    downloadVideo: (url: string, projectPath: string) => ipcRenderer.send('download-video', url, projectPath),
+    getVideoFormats: (url: string) => ipcRenderer.invoke('get-video-formats', url),
+    downloadVideo: (url: string, projectPath: string, formatId?: string) => ipcRenderer.send('download-video', url, projectPath, formatId),
     onDownloadProgress: (callback: (progress: { video: number; audio: number }) => void) => ipcRenderer.on('download-progress', (_, progress) => callback(progress)),
     onDownloadComplete: (callback: (success: boolean) => void) => ipcRenderer.on('download-complete', (_, success) => callback(success)),
     removeDownloadListeners: () => {
@@ -96,7 +97,7 @@ contextBridge.exposeInMainWorld('api', {
     readVideoFile: (filePath: string) => ipcRenderer.invoke('read-video-file', filePath),
 
     checkFinalVideoReady: (projectPath: string) => ipcRenderer.invoke('check-final-video-ready', projectPath),
-    createFinalVideo: (projectPath: string, options?: { backgroundVolume?: number, fadeDuration?: number }) => ipcRenderer.send('create-final-video', projectPath, options),
+    createFinalVideo: (projectPath: string, options?: { backgroundVolume?: number, fadeDuration?: number, lang?: string }) => ipcRenderer.send('create-final-video', projectPath, options),
     cancelFinalVideo: () => ipcRenderer.send('cancel-final-video'),
     onFinalVideoProgress: (callback: (progress: any) => void) => ipcRenderer.on('final-video-progress', (_, progress) => callback(progress)),
     removeFinalVideoListeners: () => ipcRenderer.removeAllListeners('final-video-progress'),
