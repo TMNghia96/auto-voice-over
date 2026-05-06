@@ -1,5 +1,5 @@
 import {ipcMain, dialog} from "electron";
-import {getVideoInfo, downloadVideo} from "../services/VideoService";
+import {getVideoInfo, getVideoFormats, downloadVideo} from "../services/VideoService";
 import { createFinalVideo, cancelFinalVideo } from "../services/FinalVideoService";
 import { getFfmpegPath } from "../services/EnvironmentService";
 import { 
@@ -13,10 +13,14 @@ export const setupVideoIpc = () => {
 		return getVideoInfo(url);
 	});
 
-	ipcMain.on("download-video", (event, url, projectPath) => {
+	ipcMain.handle("get-video-formats", (_event, url) => {
+		return getVideoFormats(url);
+	});
+
+	ipcMain.on("download-video", (event, url, projectPath, formatId?: string) => {
 		downloadVideo(url, projectPath, (progress) => {
 			event.sender.send("download-progress", progress);
-		}).then((success) => {
+		}, formatId).then((success) => {
 			event.sender.send("download-complete", success);
 		});
 	});
@@ -192,7 +196,7 @@ export const setupVideoIpc = () => {
 
 
 
-	ipcMain.on("create-final-video", async (event, projectPath: string, options?: { backgroundVolume?: number, fadeDuration?: number }) => {
+	ipcMain.on("create-final-video", async (event, projectPath: string, options?: { backgroundVolume?: number, fadeDuration?: number, lang?: string }) => {
 		try {
 			await createFinalVideo(
                 projectPath, 
@@ -205,7 +209,8 @@ export const setupVideoIpc = () => {
                         }
                     }
                 }, 
-                options?.backgroundVolume ?? 0.15
+                options?.backgroundVolume ?? 0.15,
+                { lang: options?.lang }
             );
 		} catch (err) {
 			console.error("Create final video failed:", err);
