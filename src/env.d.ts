@@ -37,7 +37,8 @@ interface Window {
         saveProjectMetadata: (projectPath: string, metadata: any) => Promise<boolean>;
         resetProjectData: (projectPath: string) => Promise<boolean>;
         getVideoInfo: (url: string) => Promise<any>;
-        downloadVideo: (url: string, projectPath: string) => void;
+        getVideoFormats: (url: string) => Promise<any>;
+        downloadVideo: (url: string, projectPath: string, formatId?: string) => void;
         onDownloadProgress: (callback: (progress: { video: number; audio: number }) => void) => void;
         onDownloadComplete: (callback: (success: boolean) => void) => void;
         removeDownloadListeners: () => void;
@@ -99,7 +100,7 @@ interface Window {
         readVideoFile: (filePath: string) => Promise<string | null>;
 
         checkFinalVideoReady: (projectPath: string) => Promise<{ ready: boolean; missing?: string; existingFinal?: string | null }>;
-        createFinalVideo: (projectPath: string, options?: { backgroundVolume?: number; fadeDuration?: number }) => void;
+        createFinalVideo: (projectPath: string, options?: { backgroundVolume?: number; fadeDuration?: number; lang?: string }) => void;
         cancelFinalVideo: () => void;
         onFinalVideoProgress: (callback: (progress: any) => void) => void;
         removeFinalVideoListeners: () => void;
