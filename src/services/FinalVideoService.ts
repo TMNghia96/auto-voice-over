@@ -1,13 +1,14 @@
 import path from 'path';
 import fs from 'fs';
 import { spawn, exec } from 'child_process';
-import { getFfmpegPath } from './EnvironmentService';
+import { getFfmpegPath, getFfprobePath } from './EnvironmentService';
 import { tempManager } from './TempFileManager';
 import { AudioSegmentBuilder } from './audio/AudioSegmentBuilder';
 import { AudioProcessor, cancelAudioProcessing } from './audio/AudioProcessor';
 import { EncoderFactory } from './video/encoders/EncoderFactory';
 import { SegmentValidator } from './video/SegmentValidator';
 import { VideoProcessor } from './video/VideoProcessor';
+import { SrtTimelineExporter } from './srt/SrtTimelineExporter';
 
 let activeProcesses: ReturnType<typeof spawn>[] = [];
 export let isCancelled = false;
@@ -38,29 +39,120 @@ export interface FinalVideoProgress {
 export interface FinalVideoConfig {
     duckVolume?: number;
     encoderPreference?: 'gpu' | 'cpu' | 'auto';
+    lang?: string;
 }
 
-const getMediaDuration = async (filePath: string): Promise<number> => {
-    return new Promise((resolve) => {
-        const ffmpeg = getFfmpegPath();
-        const proc = spawn(ffmpeg, ['-i', filePath, '-f', 'null', '-'], { windowsHide: true });
+interface VideoMetadata {
+    duration: number;
+    hasAudio: boolean;
+    codec: string;
+}
 
+const getVideoMetadata = async (filePath: string): Promise<VideoMetadata> => {
+    return new Promise((resolve) => {
+        if (isCancelled) return resolve({ duration: 0, hasAudio: false, codec: 'unknown' });
+        
+        // Prefer ffprobe (fast, no scan) over ffmpeg (may scan entire file if moov at end)
+        const ffprobePath = getFfprobePath();
+        const useFfprobe = fs.existsSync(ffprobePath);
+        const binPath = useFfprobe ? ffprobePath : getFfmpegPath();
+        const args = useFfprobe
+            ? ['-v', 'error', '-show_entries', 'format=duration:stream=codec_name,codec_type', '-of', 'csv=p=0', filePath]
+            : ['-i', filePath, '-f', 'null', '-'];
+        
+        const proc = spawn(binPath, args, { windowsHide: true });
+        activeProcesses.push(proc);
+
+        let resolved = false;
+        const resolveOnce = (result: VideoMetadata) => {
+            if (resolved) return;
+            resolved = true;
+            resolve(result);
+        };
+
+        const timeout = setTimeout(() => {
+            if (process.platform === 'win32' && proc.pid) {
+                const { exec } = require('child_process');
+                exec(`taskkill /pid ${proc.pid} /t /f`);
+            } else {
+                try { proc.kill('SIGKILL'); } catch {}
+            }
+            activeProcesses = activeProcesses.filter(p => p !== proc);
+            console.warn(`[getVideoMetadata] Timeout reading ${filePath}`);
+            resolveOnce({ duration: 0, hasAudio: false, codec: 'unknown' });
+        }, 30000);
+
+        let stdout = '';
         let stderr = '';
+        proc.stdout.on('data', (data) => stdout += data.toString());
         proc.stderr.on('data', (data) => stderr += data.toString());
 
         proc.on('close', () => {
-            const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/);
-            if (match) {
-                const hours = parseInt(match[1]);
-                const minutes = parseInt(match[2]);
-                const seconds = parseInt(match[3]);
-                const decimals = parseFloat(`0.${match[4]}`);
-                resolve(hours * 3600 + minutes * 60 + seconds + decimals);
+            clearTimeout(timeout);
+            activeProcesses = activeProcesses.filter(p => p !== proc);
+            
+            let duration = 0;
+            let hasAudio = false;
+            let codec = 'unknown';
+            
+            if (useFfprobe) {
+                // ffprobe output: stream codec_types then format duration (all lines)
+                // Example: "video\r\n1316.948967\r\n"
+                const output = stdout.trim() || stderr.trim();
+                const lines = output.split('\n').map(l => l.trim()).filter(l => l.length > 0);
+                console.log(`[getVideoMetadata] ffprobe stdout(${stdout.length}):`, JSON.stringify(stdout.slice(0, 200)));
+                console.log(`[getVideoMetadata] ffprobe stderr(${stderr.length}):`, JSON.stringify(stderr.slice(0, 200)));
+                
+                // Find the duration line (a pure number)
+                for (const line of lines) {
+                    const d = parseFloat(line);
+                    if (!isNaN(d) && d > 0) {
+                        duration = d;
+                        break;
+                    }
+                }
+                hasAudio = lines.some(line => line.includes('audio'));
+                
+                // Fallback: if ffprobe failed, try parsing stderr like ffmpeg
+                if (duration === 0 && stderr) {
+                    const durMatch = stderr.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/);
+                    if (durMatch) {
+                        duration = parseInt(durMatch[1])*3600 + parseInt(durMatch[2])*60 + parseInt(durMatch[3]) + parseFloat(`0.${durMatch[4]}`);
+                    }
+                    hasAudio = /Stream.*Audio/i.test(stderr);
+                }
+                // Parse codec: check stdout first (ffprobe), then stderr (ffmpeg), then combined
+                const allOutput = (stdout + stderr).toLowerCase();
+                if (allOutput.includes('h264') || allOutput.includes('avc1')) codec = 'h264';
+                else if (allOutput.includes('av1') || allOutput.includes('av01')) codec = 'av1';
+                else if (allOutput.includes('hevc') || allOutput.includes('hvc1')) codec = 'hevc';
+                else if (allOutput.includes('vp9') || allOutput.includes('vp09')) codec = 'vp9';
             } else {
-                resolve(0);
+                // ffmpeg: parse Duration from stderr, detect Audio stream
+                const durationMatch = stderr.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/);
+                if (durationMatch) {
+                    const hours = parseInt(durationMatch[1]);
+                    const minutes = parseInt(durationMatch[2]);
+                    const seconds = parseInt(durationMatch[3]);
+                    const decimals = parseFloat(`0.${durationMatch[4]}`);
+                    duration = hours * 3600 + minutes * 60 + seconds + decimals;
+                }
+                hasAudio = /Stream\s+#.*Audio:/i.test(stderr);
+                // Parse codec from stderr (contains Video: line)
+                const rawCodec = stderr.match(/Video:\s*(\w+)/i);
+                if (rawCodec) codec = rawCodec[1].toLowerCase();
             }
+            
+            console.log(`[getVideoMetadata] ${filePath}: duration=${duration.toFixed(2)}s, hasAudio=${hasAudio}, codec=${codec} (${useFfprobe ? 'ffprobe' : 'ffmpeg'})`);
+            resolveOnce({ duration, hasAudio, codec });
         });
-        proc.on('error', () => resolve(0));
+
+        proc.on('error', (err) => {
+            clearTimeout(timeout);
+            activeProcesses = activeProcesses.filter(p => p !== proc);
+            console.error(`[getVideoMetadata] Error: ${err.message}`);
+            resolveOnce({ duration: 0, hasAudio: false, codec: 'unknown' });
+        });
     });
 };
 
@@ -88,11 +180,6 @@ const runFfmpeg = (args: string[]): Promise<{ success: boolean; stderr: string }
     });
 };
 
-const hasAudioStream = async (filePath: string): Promise<boolean> => {
-    const { stderr } = await runFfmpeg(['-i', filePath, '-hide_banner']);
-    return /Stream\s+#.*Audio:/i.test(stderr);
-};
-
 const findOriginalAudio = (projectPath: string): string | null => {
     const audioDir = path.join(projectPath, 'original', 'audio');
     if (!fs.existsSync(audioDir)) return null;
@@ -109,7 +196,58 @@ const findOriginalVideo = (projectPath: string): string | null => {
     return videoFile ? path.join(videoDir, videoFile) : null;
 };
 
+const resolveTranslatedSrt = (projectPath: string, lang?: string): string | null => {
+    const translateDir = path.join(projectPath, 'translate');
+    if (!fs.existsSync(translateDir)) return null;
+
+    const srtFiles = fs.readdirSync(translateDir).filter(f => f.endsWith('.srt'));
+    if (srtFiles.length === 0) return null;
+
+    if (lang) {
+        const target = srtFiles.find(f => path.basename(f, '.srt') === lang);
+        return target ? path.join(translateDir, target) : null;
+    }
+
+    return path.join(translateDir, srtFiles[0]);
+};
+
 // Removed AV1 transcoding - too slow, use H.264 source videos instead
+
+interface VideoChunk {
+    videoStart: number;
+    videoEnd: number;
+    videoDuration: number;
+    adjustedVideoSpeed: number;
+}
+
+const buildVideoChunks = (segments: any[]): VideoChunk[] => {
+    const chunks: VideoChunk[] = [];
+    let i = 0;
+    while (i < segments.length) {
+        const seg = segments[i];
+        const currentSpeed = seg.adjustedVideoSpeed ?? seg.videoSpeed ?? 1.0;
+        let j = i + 1;
+        // Merge consecutive segments with same speed
+        while (j < segments.length) {
+            const nextSpeed = segments[j].adjustedVideoSpeed ?? segments[j].videoSpeed ?? 1.0;
+            if (Math.abs(nextSpeed - currentSpeed) < 0.001) {
+                j++;
+            } else {
+                break;
+            }
+        }
+        const last = segments[j - 1];
+        chunks.push({
+            videoStart: seg.videoStart,
+            videoEnd: last.videoEnd,
+            videoDuration: last.videoEnd - seg.videoStart,
+            adjustedVideoSpeed: currentSpeed,
+        });
+        i = j;
+    }
+    console.log(`[FinalVideoService] Merged ${segments.length} segments → ${chunks.length} video chunks (${chunks.filter(c => Math.abs(c.adjustedVideoSpeed - 1.0) > 0.001).length} need re-encode)`);
+    return chunks;
+};
 
 export const createFinalVideo = async (
     projectPath: string,
@@ -122,27 +260,74 @@ export const createFinalVideo = async (
         activeProcesses = [];
         const startTime = Date.now();
 
+        // Validate ffmpeg exists
+        const ffmpegPath = getFfmpegPath();
+        if (!fs.existsSync(ffmpegPath)) {
+            onProgress({ 
+                status: 'error', 
+                progress: 0, 
+                detail: 'FFmpeg chưa được cài đặt! Vui lòng chạy Setup Environment từ trang chủ.' 
+            });
+            return null;
+        }
+
         // Merge config with defaults
         const finalConfig: FinalVideoConfig = {
             duckVolume,
-            encoderPreference: 'gpu',
+            encoderPreference: 'gpu', // GPU now works with 256x256 test resolution
             ...config
         };
 
+        // Check GPU availability and log
+        onProgress({ status: 'preparing', progress: 2, detail: 'Đang kiểm tra GPU...' });
+        const encoderFactory = new EncoderFactory(finalConfig.encoderPreference || 'gpu');
+        const encoder = await encoderFactory.createEncoder();
+        console.log(`[FinalVideoService] Using encoder: ${encoder.name} (${encoder.type})`);
+        
+        if (encoder.type === 'cpu' && finalConfig.encoderPreference === 'gpu') {
+            console.warn('[FinalVideoService] ⚠️ GPU requested but not available, using CPU');
+            onProgress({ 
+                status: 'preparing', 
+                progress: 4, 
+                detail: '⚠️ GPU không khả dụng, sử dụng CPU...' 
+            });
+        } else if (encoder.type === 'gpu') {
+            onProgress({ 
+                status: 'preparing', 
+                progress: 4, 
+                detail: `🚀 Sử dụng GPU: ${encoder.name.toUpperCase()}` 
+            });
+        }
+
         // 1. Setup - Find original files
+        console.log('[FinalVideoService] Step 1: Finding original files...');
         onProgress({ status: 'preparing', progress: 5, detail: 'Đang tìm file gốc...' });
         
         const originalVideo = findOriginalVideo(projectPath);
+        console.log('[FinalVideoService] Original video:', originalVideo);
         if (!originalVideo) {
             onProgress({ status: 'error', progress: 0, detail: 'Không tìm thấy video gốc!' });
             return null;
         }
 
-        const videoDuration = await getMediaDuration(originalVideo);
-        if (videoDuration === 0) {
+        // ✅ Get video metadata once (duration + hasAudio)
+        console.log('[FinalVideoService] Getting video metadata...');
+        let videoMeta: VideoMetadata;
+        try {
+            videoMeta = await getVideoMetadata(originalVideo);
+        } catch (err) {
+            console.error('[FinalVideoService] getVideoMetadata failed:', err);
             onProgress({ status: 'error', progress: 0, detail: 'Không thể đọc thông tin video gốc!' });
             return null;
         }
+        console.log('[FinalVideoService] Video metadata:', videoMeta);
+        if (videoMeta.duration === 0) {
+            onProgress({ status: 'error', progress: 0, detail: 'Không thể đọc thông tin video gốc!' });
+            return null;
+        }
+        const videoDuration = videoMeta.duration;
+        const vidHasAudio = videoMeta.hasAudio;
+        console.log('[FinalVideoService] Video duration:', videoDuration, 'hasAudio:', vidHasAudio);
 
         const tempDir = path.join(projectPath, 'temp_final');
         
@@ -177,7 +362,6 @@ export const createFinalVideo = async (
         onProgress({ status: 'preparing', progress: 15, detail: 'Đang chuẩn bị luồng âm thanh gốc...' });
         
         const externalAudio = findOriginalAudio(projectPath);
-        const vidHasAudio = await hasAudioStream(originalVideo);
         
         const fullAudioWav = path.join(tempDir, 'full_audio.wav');
         let audioPrepResult;
@@ -198,7 +382,6 @@ export const createFinalVideo = async (
         // 4. Process audio segments
         onProgress({ status: 'processing', progress: 20, detail: 'Đang xử lý âm thanh...' });
         
-        const ffmpegPath = getFfmpegPath();
         const audioProcessor = new AudioProcessor(ffmpegPath, finalConfig.duckVolume!);
         
         const audioResult = await audioProcessor.processAudioSegments(
@@ -225,20 +408,45 @@ export const createFinalVideo = async (
             videoDuration
         );
 
-        // 6. Process video segments with GPU
+        // SRT export with adjusted timeline (non-fatal)
+        const exportLang = finalConfig.lang;
+        if (exportLang || fs.existsSync(path.join(projectPath, 'translate'))) {
+            try {
+                const translatedPath = resolveTranslatedSrt(projectPath, exportLang);
+                if (translatedPath) {
+                    const content = fs.readFileSync(translatedPath, 'utf-8');
+                    const outputDir = path.join(projectPath, 'final');
+                    const langCode = path.basename(translatedPath, '.srt');
+                    const outputPath = path.join(outputDir, `${langCode}.srt`);
+                    const exporter = new SrtTimelineExporter();
+                    exporter.export(validatedSegments, content, outputPath);
+                    console.log(`[FinalVideoService] Exported SRT: ${outputPath}`);
+                }
+            } catch (err) {
+                console.warn('[FinalVideoService] SRT export failed (non-fatal):', err);
+            }
+        }
+
+        // 6. Build video chunks (merge consecutive same-speed segments)
+        onProgress({ status: 'rerendering', progress: 55, detail: 'Đang gộp phân đoạn video...' });
+
+        const videoChunks = buildVideoChunks(validatedSegments);
+        
+        // 7. Process video chunks (copy fast, re-encode only speed-changed ones)
         onProgress({ status: 'rerendering', progress: 60, detail: 'Đang xử lý video bằng GPU...' });
         
-        const encoderPreference = finalConfig.encoderPreference || 'gpu';
-        const encoderFactory = new EncoderFactory(encoderPreference);
         const videoProcessor = new VideoProcessor(encoderFactory, validator, {
             concurrency: 6,
             maxRetries: 3,
             retryDelay: 1000,
-            encoderPreference: encoderPreference
+            encoderPreference: finalConfig.encoderPreference || 'gpu'
         });
 
-        const videoSegmentPaths = await videoProcessor.processVideoSegments(
-            validatedSegments,
+        const isSourceH264 = videoMeta.codec === 'h264' || videoMeta.codec === 'avc1';
+        console.log(`[FinalVideoService] Source codec: ${videoMeta.codec}, isH264: ${isSourceH264}`);
+
+        const chunkVideoPaths = await videoProcessor.processVideoChunks(
+            videoChunks,
             originalVideo,
             tempDir,
             (pct) => {
@@ -248,34 +456,58 @@ export const createFinalVideo = async (
                     progress,
                     detail: `Đang xử lý video ${Math.round(pct * 100)}%...`
                 });
-            }
+            },
+            !isSourceH264
         );
+        console.log(`[FinalVideoService] Processed ${chunkVideoPaths.length} video chunks`);
 
-        // 7. Mux each video segment with its audio segment
-        onProgress({ status: 'rerendering', progress: 75, detail: 'Đang đồng bộ audio với video...' });
-        
-        const muxedSegmentPaths = await videoProcessor.muxSegmentsWithAudio(
-            videoSegmentPaths,
-            audioResult.segmentPaths,
-            tempDir,
-            (pct) => {
-                const progress = 75 + Math.round(pct * 10);
-                onProgress({
-                    status: 'rerendering',
-                    progress,
-                    detail: `Đang đồng bộ ${Math.round(pct * 100)}%...`
-                });
-            }
-        );
-
-        // 8. Concatenate muxed segments
-        onProgress({ status: 'rerendering', progress: 85, detail: 'Đang gộp các đoạn video...' });
+        // 8. Concat video chunks
+        onProgress({ status: 'rerendering', progress: 75, detail: 'Đang gộp video...' });
         
         const outputDir = path.join(projectPath, 'final');
         if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
         const outputPath = path.join(outputDir, 'final_video.mp4');
-        await videoProcessor.concatenateVideo(muxedSegmentPaths, outputPath);
+        const tempVideoPath = path.join(tempDir, 'concated_video.mp4');
+        
+        try {
+            if (isSourceH264) {
+                console.log('[FinalVideoService] Source is H264 → stream copy concat');
+                try {
+                    await videoProcessor.concatenateCopy(chunkVideoPaths, tempVideoPath);
+                } catch (copyErr: any) {
+                    console.warn('[FinalVideoService] Stream copy failed, falling back to re-encode:', copyErr.message);
+                    await videoProcessor.concatenateVideo(chunkVideoPaths, tempVideoPath);
+                }
+            } else {
+                console.log(`[FinalVideoService] Source is ${videoMeta.codec} → re-encode concat`);
+                await videoProcessor.concatenateVideo(chunkVideoPaths, tempVideoPath);
+            }
+        } catch (concatErr: any) {
+            throw new Error(`Lỗi gộp video: ${concatErr.message}`);
+        }
+
+        // 9. Concat audio segments into one stream
+        onProgress({ status: 'rerendering', progress: 85, detail: 'Đang gộp âm thanh...' });
+        
+        let finalAudioPath: string;
+        try {
+            finalAudioPath = await audioProcessor.concatenateAudio(
+                audioResult.segmentPaths,
+                tempDir
+            );
+        } catch (audioErr: any) {
+            throw new Error(`Lỗi gộp âm thanh: ${audioErr.message}`);
+        }
+
+        // 10. Mux video + audio (1 final step instead of per-segment)
+        onProgress({ status: 'rerendering', progress: 90, detail: 'Đang đồng bộ audio với video...' });
+        
+        try {
+            await videoProcessor.muxWithAudio(tempVideoPath, finalAudioPath, outputPath);
+        } catch (muxErr: any) {
+            throw new Error(`Lỗi đồng bộ audio-video: ${muxErr.message}`);
+        }
 
         // Cleanup - delay to allow Windows to release file locks
         await new Promise(resolve => setTimeout(resolve, 500));
