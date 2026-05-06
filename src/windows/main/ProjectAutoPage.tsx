@@ -283,7 +283,7 @@ ${userPrompt}`.trim();
                     }
                 });
 
-                window.api.createFinalVideo(projectPath);
+                window.api.createFinalVideo(projectPath, { lang: targetLanguage });
             });
 
             // Done!
