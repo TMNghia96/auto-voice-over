@@ -42,6 +42,7 @@ export const CreateFinalVideoPhase = ({ onComplete }: { onComplete?: () => void 
 	const [outputPath, setOutputPath] = useState<string | null>(null);
 	const [hasExistingFinal, setHasExistingFinal] = useState(false);
 	const [missingItem, setMissingItem] = useState("");
+	const [encoderType, setEncoderType] = useState<'gpu' | 'cpu' | null>(null);
 
 	const { setIsProcessing: setGlobalProcessing } = useProcessContext();
 
@@ -96,6 +97,13 @@ export const CreateFinalVideoPhase = ({ onComplete }: { onComplete?: () => void 
 	useEffect(() => {
 		window.api.onFinalVideoProgress((progressData: VideoProgress) => {
 			setProgress(progressData);
+
+			// Parse encoder type from detail message
+			if (progressData.detail?.includes('GPU') || progressData.detail?.includes('🚀')) {
+				setEncoderType('gpu');
+			} else if (progressData.detail?.includes('CPU') || progressData.detail?.includes('⚙️')) {
+				setEncoderType('cpu');
+			}
 
 			if (progressData.status === "done") {
 				setIsProcessing(false);
@@ -255,6 +263,19 @@ export const CreateFinalVideoPhase = ({ onComplete }: { onComplete?: () => void 
 					<p className='text-sm text-muted-foreground'>
 						{progress?.detail || "Đang chuẩn bị..."}
 					</p>
+					{encoderType && (
+						<div className="flex items-center justify-center gap-2 mt-2">
+							{encoderType === 'gpu' ? (
+								<span className="px-3 py-1 bg-green-500/10 text-green-500 rounded-md font-semibold text-xs flex items-center gap-1">
+									🚀 GPU Accelerated
+								</span>
+							) : (
+								<span className="px-3 py-1 bg-yellow-500/10 text-yellow-500 rounded-md font-semibold text-xs flex items-center gap-1">
+									⚙️ CPU Encoding
+								</span>
+							)}
+						</div>
+					)}
 				</div>
 
 				{ }

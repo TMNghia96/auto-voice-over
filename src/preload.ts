@@ -92,6 +92,7 @@ contextBridge.exposeInMainWorld('api', {
     setVoicePreference: (projectPath: string, lang: string, voiceId: string) => ipcRenderer.invoke('set-voice-preference', projectPath, lang, voiceId),
     getConcurrencySettings: (projectPath: string) => ipcRenderer.invoke('get-concurrency-settings', projectPath),
     setConcurrencySettings: (projectPath: string, settings: { initial: number; min: number; max: number }) => ipcRenderer.invoke('set-concurrency-settings', projectPath, settings),
+    getVoicesForLanguage: (lang: string) => ipcRenderer.invoke('get-voices-for-language', lang),
 
     readGeneratedAudio: (filePath: string) => ipcRenderer.invoke('read-generated-audio', filePath),
     readVideoFile: (filePath: string) => ipcRenderer.invoke('read-video-file', filePath),

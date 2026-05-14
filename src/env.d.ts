@@ -123,5 +123,6 @@ interface Window {
         setVoicePreference: (projectPath: string, lang: string, voiceId: string) => Promise<{ success: boolean }>;
         getConcurrencySettings: (projectPath: string) => Promise<{ initial: number; min: number; max: number } | undefined>;
         setConcurrencySettings: (projectPath: string, settings: { initial: number; min: number; max: number }) => Promise<{ success: boolean }>;
+        getVoicesForLanguage: (lang: string) => Promise<{ success: boolean; voices: Array<{ id: string; name: string; gender: 'Male' | 'Female' | 'Neutral'; language: string; label: string; isPreset: boolean }> }>;
     };
 }

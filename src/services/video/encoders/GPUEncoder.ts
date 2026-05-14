@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import { stat } from 'fs/promises';
 import { VideoEncoder } from './VideoEncoder';
 import { EncodeOptions, EncodeResult } from '../types';
+import { getFfmpegPath } from '../../EnvironmentService';
 
 const execFileAsync = promisify(execFile);
 
@@ -30,9 +31,10 @@ export class GPUEncoder implements VideoEncoder {
 
     try {
       // Test encode with null output to verify GPU availability
-      const { stderr } = await execFileAsync('ffmpeg', [
+      // Use 256x256 instead of 64x64 - AMD AMF requires minimum 128x128
+      const { stderr } = await execFileAsync(getFfmpegPath(), [
         '-f', 'lavfi',
-        '-i', 'color=black:s=64x64:d=0.1',
+        '-i', 'color=black:s=256x256:d=0.1',
         '-c:v', this.codec,
         '-f', 'null',
         '-'
@@ -72,9 +74,9 @@ export class GPUEncoder implements VideoEncoder {
         outputPath
       ];
 
-      await execFileAsync('ffmpeg', args, { 
+      await execFileAsync(getFfmpegPath(), args, { 
         maxBuffer: 10 * 1024 * 1024,
-        timeout: 60000 
+        timeout: 300000 // 5 min for 4K video
       });
 
       // Get output file stats
@@ -102,12 +104,14 @@ export class GPUEncoder implements VideoEncoder {
    * Get FFmpeg encoder arguments for GPU encoding
    */
   getEncoderArgs(options: EncodeOptions): string[] {
-    const speedFilter = options.videoSpeed !== 1.0 
-      ? `setpts=${(1 / options.videoSpeed).toFixed(6)}*PTS`
-      : null;
+    const videoFilter = Math.abs(options.videoSpeed - 1.0) > 0.001
+      ? `setpts=${(1 / options.videoSpeed).toFixed(6)}*(PTS-STARTPTS),fps=${options.fps}`
+      : `setpts=PTS-STARTPTS,fps=${options.fps}`;
 
     const args = [
+      '-an',
       '-c:v', this.codec,
+      '-vf', videoFilter,
       '-r', options.fps.toString(),
       '-g', (options.fps * 2).toString(), // Keyframe every 2 seconds for smooth concat
       '-keyint_min', options.fps.toString() // Min keyframe interval
@@ -116,11 +120,6 @@ export class GPUEncoder implements VideoEncoder {
     // Add preset for NVIDIA only (AMD doesn't support preset)
     if (this.gpuType === 'nvidia') {
       args.push('-preset', options.preset);
-    }
-
-    // Add video filter if needed
-    if (speedFilter) {
-      args.push('-vf', speedFilter);
     }
 
     // GPU encoders use quality parameter instead of CRF

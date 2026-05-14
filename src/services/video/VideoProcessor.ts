@@ -1,9 +1,10 @@
 import pLimit from 'p-limit';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { execFile } from 'child_process';
+import { execFile, spawn, exec } from 'child_process';
 import { promisify } from 'util';
 import { EncoderFactory } from './encoders/EncoderFactory';
+import { getFfmpegPath, getFfprobePath } from '../EnvironmentService';
 import { SegmentValidator } from './SegmentValidator';
 import { VideoEncoder } from './encoders/VideoEncoder';
 import {
@@ -76,7 +77,7 @@ export class VideoProcessor {
           onProgress(completedCount / segments.length);
           
           console.error(`Segment ${index} failed permanently:`, error);
-          return { success: false, path: null, index, error: (error as Error).message };
+          return { success: false, path: null as string | null, index, error: (error as Error).message };
         }
       })
     );
@@ -204,7 +205,7 @@ export class VideoProcessor {
     try {
       if (useCopy) {
         // Fast copy mode with fps filter to ensure CFR
-        await execFileAsync('ffmpeg', [
+        await this.spawnFfmpeg([
           '-f', 'concat',
           '-safe', '0',
           '-i', concatListPath,
@@ -227,7 +228,7 @@ export class VideoProcessor {
           ? ['-c:v', encoder.name, '-quality', 'balanced', '-rc', 'cqp', '-qp_i', '18', '-qp_p', '18']
           : ['-c:v', 'libx264', '-preset', 'fast', '-crf', '18'];
 
-        await execFileAsync('ffmpeg', [
+        await this.spawnFfmpeg([
           '-f', 'concat',
           '-safe', '0',
           '-i', concatListPath,
@@ -356,7 +357,7 @@ export class VideoProcessor {
 
     // Run FFmpeg mux with proper sync flags
     try {
-      await execFileAsync('ffmpeg', [
+      await execFileAsync(getFfmpegPath(), [
         '-i', videoPath,
         '-i', audioPath,
         '-c:v', 'copy',
@@ -368,7 +369,7 @@ export class VideoProcessor {
         '-vsync', 'cfr',      // Constant frame rate
         '-y',
         outputPath,
-      ]);
+      ], { maxBuffer: 10 * 1024 * 1024 });
 
       return true;
     } catch (error) {
@@ -381,5 +382,168 @@ export class VideoProcessor {
    */
   private sleep(ms: number): Promise<void> {
     return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  private getMediaDuration(filePath: string): Promise<number> {
+    return new Promise((resolve) => {
+      const ffprobe = getFfprobePath();
+      const proc = spawn(ffprobe, [
+        '-v', 'error',
+        '-show_entries', 'format=duration',
+        '-of', 'csv=p=0',
+        filePath,
+      ], { windowsHide: true });
+
+      let stdout = '';
+      proc.stdout.on('data', (data: Buffer) => {
+        stdout += data.toString();
+      });
+      proc.on('close', () => {
+        const d = parseFloat(stdout.trim());
+        resolve(Number.isFinite(d) ? d : 0);
+      });
+      proc.on('error', () => resolve(0));
+    });
+  }
+
+  /**
+   * Spawn ffmpeg with streaming stderr (no maxBuffer limit)
+   */
+  private spawnFfmpeg(args: string[], timeoutMs: number = 600000): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const proc = spawn(getFfmpegPath(), args, { windowsHide: true });
+      let lastStderr = '';
+      proc.stderr.on('data', (data: Buffer) => {
+        lastStderr = (lastStderr + data.toString()).slice(-1024);
+      });
+      const timer = setTimeout(() => {
+        if (process.platform === 'win32' && proc.pid) {
+          exec(`taskkill /pid ${proc.pid} /t /f`);
+        } else {
+          try { proc.kill('SIGKILL'); } catch {}
+        }
+        reject(new Error(`FFmpeg timeout after ${timeoutMs}ms: ${lastStderr.slice(-200)}`));
+      }, timeoutMs);
+      proc.on('close', (code) => {
+        clearTimeout(timer);
+        if (code === 0) { resolve(); }
+        else { reject(new Error(`FFmpeg exit ${code}: ${lastStderr.slice(-500)}`)); }
+      });
+      proc.on('error', (err) => {
+        clearTimeout(timer);
+        reject(new Error(`FFmpeg spawn error: ${err.message}`));
+      });
+    });
+  }
+
+  /**
+   * Process video chunks (merged consecutive same-speed segments)
+   * @param forceEncode - when true, encodes ALL chunks (non-H264 source needs unified codec)
+   */
+  async processVideoChunks(
+    chunks: Array<{ videoStart: number; videoEnd: number; videoDuration: number; adjustedVideoSpeed: number }>,
+    originalVideo: string,
+    tempDir: string,
+    onProgress: (progress: number) => void,
+    forceEncode: boolean = false
+  ): Promise<string[]> {
+    if (chunks.length === 0) return [];
+    const needEncode = chunks;
+    console.log(`[VideoProcessor] Chunks: ${chunks.length} total, ${needEncode.length} encode, 0 copy (safe render mode)`);
+
+    let encoder: VideoEncoder | null = null;
+    if (needEncode.length > 0) {
+      encoder = await this.encoderFactory.createEncoder();
+      console.log(`[VideoProcessor] Using ${encoder.type.toUpperCase()} encoder: ${encoder.name}`);
+    }
+
+    const encodeLimit = encoder ? pLimit(encoder.type === 'gpu' ? 4 : 2) : pLimit(1);
+    let completed = 0;
+    const outputPaths: string[] = new Array(chunks.length);
+
+    const promises = chunks.map((chunk, index) => {
+      const executor = encodeLimit;
+      return executor(async () => {
+        try {
+          const out = path.join(tempDir, `chunk_${String(index).padStart(4, '0')}.mp4`);
+          console.log(`[VideoProcessor] Encode chunk ${index}: start=${chunk.videoStart.toFixed(2)} dur=${chunk.videoDuration.toFixed(2)} speed=${chunk.adjustedVideoSpeed.toFixed(2)}`);
+          await this.encodeChunk(encoder!, chunk, index, originalVideo, out);
+
+          const expectedDuration = chunk.videoDuration / Math.max(chunk.adjustedVideoSpeed, 0.001);
+          const actualDuration = await this.getMediaDuration(out);
+          if (actualDuration > 0 && Math.abs(actualDuration - expectedDuration) > 0.3) {
+            console.warn(
+              `Chunk ${index} duration mismatch: expected ${expectedDuration.toFixed(3)}s, got ${actualDuration.toFixed(3)}s (non-fatal)`
+            );
+          }
+
+          completed++;
+          onProgress(completed / chunks.length);
+          outputPaths[index] = out;
+        } catch (error) {
+          completed++;
+          onProgress(completed / chunks.length);
+          console.error(`Chunk ${index} failed:`, error);
+          throw error;
+        }
+      });
+    });
+    await Promise.all(promises);
+    return outputPaths;
+  }
+
+  private async copyChunk(
+    originalVideo: string, outputPath: string,
+    startTime: number, duration: number, index: number
+  ): Promise<void> {
+    for (let attempt = 1; attempt <= this.config.maxRetries; attempt++) {
+      try {
+        await execFileAsync(getFfmpegPath(), [
+          '-ss', startTime.toFixed(3), '-t', duration.toFixed(3),
+          '-i', originalVideo, '-c', 'copy', '-y', outputPath,
+        ], { timeout: 30000 });
+        const stats = await fs.stat(outputPath);
+        if (stats.size > 0) return;
+        console.warn(`[VideoProcessor] Copy chunk ${index} attempt ${attempt}: empty output`);
+      } catch (error) {
+        console.warn(`[VideoProcessor] Copy chunk ${index} attempt ${attempt} failed:`, (error as Error).message);
+      }
+      if (attempt < this.config.maxRetries) await this.sleep(this.config.retryDelay * Math.pow(2, attempt - 1));
+    }
+    throw new Error(`Failed to copy chunk ${index} after ${this.config.maxRetries} attempts`);
+  }
+
+  private async encodeChunk(
+    encoder: VideoEncoder, chunk: any, index: number,
+    originalVideo: string, outputPath: string
+  ): Promise<void> {
+    const opts: EncodeOptions = {
+      startTime: chunk.videoStart, duration: chunk.videoDuration,
+      videoSpeed: chunk.adjustedVideoSpeed, fps: 30, crf: 23, preset: 'medium',
+    };
+    for (let attempt = 1; attempt <= this.config.maxRetries; attempt++) {
+      try {
+        const r = await encoder.encodeSegment(originalVideo, outputPath, opts);
+        if (r.success) return;
+        console.warn(`[VideoProcessor] Encode chunk ${index} attempt ${attempt}: ${r.error}`);
+      } catch (error) {
+        console.warn(`[VideoProcessor] Encode chunk ${index} attempt ${attempt}:`, (error as Error).message);
+      }
+      if (attempt < this.config.maxRetries) await this.sleep(this.config.retryDelay * Math.pow(2, attempt - 1));
+    }
+    throw new Error(`Failed to encode chunk ${index} after ${this.config.maxRetries} attempts`);
+  }
+
+  /**
+   * Concat with stream copy (no re-encode) — instant for H264 source
+   */
+  async concatenateCopy(segmentPaths: string[], outputPath: string): Promise<void> {
+    const tempDir = path.dirname(outputPath);
+    const listPath = path.join(tempDir, 'concat_list.txt');
+    const content = segmentPaths.map(p => `file '${p.replace(/\\/g, '/')}'`).join('\n');
+    await fs.writeFile(listPath, content, 'utf-8');
+    console.log(`[Concat Copy] Concatenating ${segmentPaths.length} segments (stream copy)`);
+    await this.spawnFfmpeg(['-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', '-y', outputPath], 60000);
+    await fs.unlink(listPath).catch(() => {});
   }
 }

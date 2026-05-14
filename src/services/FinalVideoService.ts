@@ -471,18 +471,8 @@ export const createFinalVideo = async (
         const tempVideoPath = path.join(tempDir, 'concated_video.mp4');
         
         try {
-            if (isSourceH264) {
-                console.log('[FinalVideoService] Source is H264 → stream copy concat');
-                try {
-                    await videoProcessor.concatenateCopy(chunkVideoPaths, tempVideoPath);
-                } catch (copyErr: any) {
-                    console.warn('[FinalVideoService] Stream copy failed, falling back to re-encode:', copyErr.message);
-                    await videoProcessor.concatenateVideo(chunkVideoPaths, tempVideoPath);
-                }
-            } else {
-                console.log(`[FinalVideoService] Source is ${videoMeta.codec} → re-encode concat`);
-                await videoProcessor.concatenateVideo(chunkVideoPaths, tempVideoPath);
-            }
+            console.log(`[FinalVideoService] Source is ${videoMeta.codec} → safe re-encode concat`);
+            await videoProcessor.concatenateVideo(chunkVideoPaths, tempVideoPath, false);
         } catch (concatErr: any) {
             throw new Error(`Lỗi gộp video: ${concatErr.message}`);
         }

@@ -4,7 +4,6 @@ import started from "electron-squirrel-startup";
 import { connectDB } from "./services/DatabaseService";
 import { startVideoServer } from "./services/VideoServerService";
 import { setupIpcHandlers } from "./ipc";
-import { mcpService } from "./services/McpService";
 
 declare const MAIN_WINDOW_VITE_DEV_SERVER_URL: string;
 declare const MAIN_WINDOW_VITE_NAME: string;
@@ -31,7 +30,6 @@ const createWindow = () => {
 
 	if (MAIN_WINDOW_VITE_DEV_SERVER_URL) {
 		mainWindow.loadURL(MAIN_WINDOW_VITE_DEV_SERVER_URL);
-		mainWindow.webContents.openDevTools({ mode: 'detach' });
 	} else {
 		mainWindow.loadFile(
 			path.join(
@@ -92,13 +90,6 @@ app.whenReady().then(async () => {
 	setupIpcHandlers();
 	console.log("[Main] IPC Handlers ready.");
 
-	try {
-		console.log("[Main] Starting MCP Service...");
-		mcpService.start();
-		// MCP start log is inside the service
-	} catch (error) {
-		console.error("[Main] Failed to start MCP Service:", error);
-	}
 	
 	console.log("[Main] Creating Main Window...");
 	createWindow();

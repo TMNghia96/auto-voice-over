@@ -15,35 +15,32 @@ describe('FinalVideoService - Video Stretching Fix (Frozen Frames)', () => {
         }
     };
     
-    it('should slow down video when videoSpeed > 1.0 (audio longer than video)', () => {
-        // Scenario: Audio 15s, Video 10s
-        // audioSpeed = 1.3, targetDuration = 11.54s, videoSpeed = 1.154
-        const videoSpeed = 1.154;
+    it('should lengthen video when videoSpeed < 1.0', () => {
+        // Scenario: Need longer output duration than original
+        const videoSpeed = 0.8666;
         const setpts = calculateSetpts(videoSpeed);
         
-        // Expected: setpts = (1/1.154)*PTS = 0.8666*PTS
-        // This makes video play SLOWER (slow motion)
-        expect(setpts).toContain('0.8666');
+        // Expected: setpts = (1/0.8666)*PTS = 1.1539*PTS
+        // FFmpeg setpts multiplier > 1 lengthens output duration
+        expect(setpts).toContain('1.1539');
         expect(setpts).toContain('*PTS');
         
-        // Verify multiplier is less than 1.0 (slow motion)
-        const multiplier = parseFloat(setpts.split('*')[0]);
-        expect(multiplier).toBeLessThan(1.0);
-    });
-    
-    it('should speed up video when videoSpeed < 1.0', () => {
-        // Scenario: Need to compress video
-        const videoSpeed = 0.8;
-        const setpts = calculateSetpts(videoSpeed);
-        
-        // Expected: setpts = (1/0.8)*PTS = 1.2500*PTS
-        // This makes video play FASTER
-        expect(setpts).toContain('1.2500');
-        expect(setpts).toContain('*PTS');
-        
-        // Verify multiplier is greater than 1.0 (speed up)
+        // Verify multiplier is greater than 1.0 (longer output)
         const multiplier = parseFloat(setpts.split('*')[0]);
         expect(multiplier).toBeGreaterThan(1.0);
+    });
+    
+    it('should shorten video when videoSpeed > 1.0', () => {
+        const videoSpeed = 1.25;
+        const setpts = calculateSetpts(videoSpeed);
+        
+        // Expected: setpts = (1/1.25)*PTS = 0.8000*PTS (shorter output)
+        expect(setpts).toContain('0.8000');
+        expect(setpts).toContain('*PTS');
+        
+        // Verify multiplier is less than 1.0 (shorter output)
+        const multiplier = parseFloat(setpts.split('*')[0]);
+        expect(multiplier).toBeLessThan(1.0);
     });
     
     it('should not change speed when videoSpeed = 1.0', () => {
@@ -82,16 +79,16 @@ describe('FinalVideoService - Video Stretching Fix (Frozen Frames)', () => {
         // Original video: 10 seconds
         const originalDuration = 10;
         
-        // Case 1: videoSpeed = 1.154 (need to stretch to 11.54s)
-        const videoSpeed1 = 1.154;
+        // Case 1: videoSpeed = 0.8666 (need to stretch to 11.54s)
+        const videoSpeed1 = 0.8666;
         const ptsMultiplier1 = 1.0 / videoSpeed1;
-        const resultDuration1 = originalDuration / ptsMultiplier1;
+        const resultDuration1 = originalDuration * ptsMultiplier1;
         expect(resultDuration1).toBeCloseTo(11.54, 1);
         
-        // Case 2: videoSpeed = 0.8 (need to compress to 8s)
-        const videoSpeed2 = 0.8;
+        // Case 2: videoSpeed = 1.25 (need to compress to 8s)
+        const videoSpeed2 = 1.25;
         const ptsMultiplier2 = 1.0 / videoSpeed2;
-        const resultDuration2 = originalDuration / ptsMultiplier2;
+        const resultDuration2 = originalDuration * ptsMultiplier2;
         expect(resultDuration2).toBeCloseTo(8.0, 1);
     });
     
@@ -159,16 +156,15 @@ describe('FinalVideoService - Video Stretching Fix (Frozen Frames)', () => {
     });
     
     it('should not cause frozen frames with correct setpts', () => {
-        // Frozen frames occur when setpts > 1.0 for slow motion
-        // Correct formula should use setpts < 1.0 for slow motion
+        // FFmpeg setpts multiplier > 1 lengthens output; < 1 shortens output
         
-        const videoSpeed = 1.5; // Need to slow down video
+        const videoSpeed = 0.6667; // Need to lengthen output video
         const setpts = calculateSetpts(videoSpeed);
         const multiplier = parseFloat(setpts.split('*')[0]);
         
-        // Multiplier should be < 1.0 to slow down video
-        expect(multiplier).toBeLessThan(1.0);
-        expect(multiplier).toBeCloseTo(0.6667, 3);
+        // Multiplier should be > 1.0 to lengthen output
+        expect(multiplier).toBeGreaterThan(1.0);
+        expect(multiplier).toBeCloseTo(1.5, 3);
         
         // This will NOT cause frozen frames
     });

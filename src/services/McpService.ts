@@ -18,6 +18,7 @@ import { getVideoInfo } from './VideoService';
 import { getHardwareInfo } from './HardwareService';
 import { optimizeSrtFile } from '../lib/SrtOptimizer';
 import { createFinalVideo } from './FinalVideoService';
+import { pipelineOrchestrator } from './PipelineOrchestrator';
 
 export class McpService {
   private server: Server;
@@ -134,6 +135,117 @@ export class McpService {
             required: ['projectPath'],
           },
         },
+        {
+          name: 'create_project',
+          description: 'Tạo project mới và lưu vào database.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              basePath: { type: 'string', description: 'Thư mục cha để tạo project' },
+              projectName: { type: 'string', description: 'Tên project mới' },
+            },
+            required: ['basePath', 'projectName'],
+          },
+        },
+        {
+          name: 'download_video_to_project',
+          description: 'Tải video/audio từ URL vào project.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              videoUrl: { type: 'string' },
+              projectPath: { type: 'string' },
+              formatId: { type: 'string' },
+            },
+            required: ['videoUrl', 'projectPath'],
+          },
+        },
+        {
+          name: 'transcribe_project',
+          description: 'Tạo SRT gốc từ audio trong project.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              engine: { type: 'string', enum: ['whisper-cpu', 'whisper-gpu', 'whisper-openblas'] },
+              language: { type: 'string' },
+            },
+            required: ['projectPath'],
+          },
+        },
+        {
+          name: 'translate_project_srt',
+          description: 'Dịch SRT gốc bằng DeepSeek config hiện tại và lưu translate/<lang>.srt.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              targetLang: { type: 'string' },
+            },
+            required: ['projectPath', 'targetLang'],
+          },
+        },
+        {
+          name: 'generate_project_audio',
+          description: 'Tạo voice-over audio từ SRT đã dịch.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              targetLang: { type: 'string' },
+              voiceId: { type: 'string' },
+            },
+            required: ['projectPath', 'targetLang'],
+          },
+        },
+        {
+          name: 'create_project_final_video',
+          description: 'Render final video từ project đã có video, audio, SRT.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string' },
+              targetLang: { type: 'string' },
+              backgroundVolume: { type: 'number' },
+            },
+            required: ['projectPath', 'targetLang'],
+          },
+        },
+        {
+          name: 'run_full_pipeline',
+          description: 'Chạy toàn bộ workflow bất đồng bộ: trả về runId ngay, pipeline chạy nền. Dùng get_pipeline_status để kiểm tra tiến độ.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              videoUrl: { type: 'string' },
+              basePath: { type: 'string' },
+              projectName: { type: 'string' },
+              targetLang: { type: 'string' },
+              sourceLang: { type: 'string' },
+              whisperEngine: { type: 'string', enum: ['whisper-cpu', 'whisper-gpu', 'whisper-openblas'] },
+              formatId: { type: 'string' },
+              voiceId: { type: 'string' },
+              backgroundVolume: { type: 'number' },
+            },
+            required: ['videoUrl', 'basePath', 'projectName', 'targetLang'],
+          },
+        },
+        {
+          name: 'get_pipeline_status',
+          description: 'Đọc trạng thái pipeline từ file pipeline-status.json trong project folder.',
+          inputSchema: {
+            type: 'object',
+            properties: {
+              projectPath: { type: 'string', description: 'Đường dẫn project (lấy từ runId/projectPath của run_full_pipeline)' },
+            },
+            required: ['projectPath'],
+          },
+        },
+        {
+          name: 'cancel_pipeline',
+          description: 'Hủy pipeline đang chạy. Chỉ hủy được pipeline gần nhất được start từ server này.',
+          inputSchema: { type: 'object', properties: {} },
+        },
       ];
 
       this.registeredTools = fullToolsList.map(t => t.name);
@@ -236,6 +348,86 @@ export class McpService {
             if (!resultPath) throw new Error('Quá trình merge video gặp lỗi.');
             return {
               content: [{ type: 'text', text: `Đã đóng gói hoàn tất video tại: ${resultPath}` }],
+            };
+          }
+
+          case 'create_project': {
+            const { basePath, projectName } = args as any;
+            const result = await pipelineOrchestrator.createProject(basePath, projectName);
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+          }
+
+          case 'download_video_to_project': {
+            const { videoUrl, projectPath, formatId } = args as any;
+            await pipelineOrchestrator.downloadProjectVideo(videoUrl, projectPath, formatId, (step, progress, detail) => {
+              console.log(`[MCP Pipeline] ${step}: ${progress}% - ${detail}`);
+            });
+            return { content: [{ type: 'text', text: JSON.stringify({ success: true, projectPath }, null, 2) }] };
+          }
+
+          case 'transcribe_project': {
+            const { projectPath, engine, language } = args as any;
+            const result = await pipelineOrchestrator.transcribeProject(projectPath, engine, language || 'auto', (step, progress, detail) => {
+              console.log(`[MCP Pipeline] ${step}: ${progress}% - ${detail}`);
+            });
+            return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+          }
+
+          case 'translate_project_srt': {
+            const { projectPath, targetLang } = args as any;
+            const srtPath = await pipelineOrchestrator.translateProject(projectPath, targetLang, (step, progress, detail) => {
+              console.log(`[MCP Pipeline] ${step}: ${progress}% - ${detail}`);
+            });
+            return { content: [{ type: 'text', text: JSON.stringify({ success: true, srtPath }, null, 2) }] };
+          }
+
+          case 'generate_project_audio': {
+            const { projectPath, targetLang, voiceId } = args as any;
+            const audioDir = await pipelineOrchestrator.generateProjectAudio(projectPath, targetLang, voiceId, (step, progress, detail) => {
+              console.log(`[MCP Pipeline] ${step}: ${progress}% - ${detail}`);
+            });
+            return { content: [{ type: 'text', text: JSON.stringify({ success: true, audioDir }, null, 2) }] };
+          }
+
+          case 'create_project_final_video': {
+            const { projectPath, targetLang, backgroundVolume } = args as any;
+            const finalVideoPath = await pipelineOrchestrator.createProjectFinalVideo(projectPath, targetLang, backgroundVolume, (step, progress, detail) => {
+              console.log(`[MCP Pipeline] ${step}: ${progress}% - ${detail}`);
+            });
+            return { content: [{ type: 'text', text: JSON.stringify({ success: true, finalVideoPath }, null, 2) }] };
+          }
+
+          case 'run_full_pipeline': {
+            const startResult = pipelineOrchestrator.startPipeline(args as any);
+            if (!startResult.accepted) {
+              return {
+                content: [{ type: 'text', text: JSON.stringify(startResult, null, 2) }],
+                isError: true,
+              };
+            }
+            return {
+              content: [{ type: 'text', text: JSON.stringify(startResult, null, 2) }],
+            };
+          }
+
+          case 'get_pipeline_status': {
+            const { projectPath } = args as any;
+            const status = pipelineOrchestrator.readStatus(projectPath);
+            if (!status) {
+              return {
+                content: [{ type: 'text', text: JSON.stringify({ error: 'Không tìm thấy trạng thái pipeline cho project này.' }, null, 2) }],
+                isError: true,
+              };
+            }
+            return {
+              content: [{ type: 'text', text: JSON.stringify(status, null, 2) }],
+            };
+          }
+
+          case 'cancel_pipeline': {
+            pipelineOrchestrator.cancelPipeline();
+            return {
+              content: [{ type: 'text', text: JSON.stringify({ success: true, message: 'Đã gửi yêu cầu hủy pipeline.' }, null, 2) }],
             };
           }
 

@@ -7,6 +7,10 @@ import { ValidatedSegment, EncodeResult, VideoProcessorConfig } from '../../../s
 import * as fs from 'fs/promises';
 import * as path from 'path';
 
+vi.mock('electron', () => ({
+  app: { isPackaged: false },
+}));
+
 // Mock dependencies
 vi.mock(import('fs/promises'), async (importOriginal) => {
   return {
@@ -386,6 +390,35 @@ describe('VideoProcessor', () => {
       await expect(
         videoProcessor.concatenateVideo([], '/output/merged.mp4')
       ).rejects.toThrow('No segment paths provided for concatenation');
+    });
+  });
+
+  describe('processVideoChunks', () => {
+    it('should encode 1x-speed chunks instead of stream-copying them', async () => {
+      const onProgress = vi.fn();
+      const chunks = [
+        { videoStart: 0, videoEnd: 5, videoDuration: 5, adjustedVideoSpeed: 1.0 },
+      ];
+
+      const result = await videoProcessor.processVideoChunks(
+        chunks,
+        '/video/original.mp4',
+        '/temp',
+        onProgress
+      );
+
+      expect(result).toEqual([path.join('/temp', 'chunk_0000.mp4')]);
+      expect(mockEncoder.encodeSegment).toHaveBeenCalledWith(
+        '/video/original.mp4',
+        path.join('/temp', 'chunk_0000.mp4'),
+        expect.objectContaining({
+          startTime: 0,
+          duration: 5,
+          videoSpeed: 1.0,
+          fps: 30,
+        })
+      );
+      expect(onProgress).toHaveBeenCalledWith(1);
     });
   });
 

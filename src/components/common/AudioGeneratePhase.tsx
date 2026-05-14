@@ -6,6 +6,7 @@ import { Progress } from "@/components/ui/progress";
 import { VoiceSelector } from './VoiceSelector';
 import { VoiceModal } from './VoiceModal';
 import { getPresetsForLanguage } from '@/services/tts/VoiceCatalog';
+import type { VoiceOption } from '@/services/tts/VoiceCatalog';
 import { AudioPlaybackService } from '@/services/AudioPlaybackService';
 import {
     Volume2,
@@ -63,6 +64,7 @@ const getEntryState = (index: number): EntryState => entryStatuses.get(index) ||
 
     const [error, setError] = useState<string | null>(null);
     const [selectedVoiceId, setSelectedVoiceId] = useState<string>('');
+    const [availableVoices, setAvailableVoices] = useState<VoiceOption[]>([]);
 
     const handleVoiceChange = (voiceId: string) => {
         setSelectedVoiceId(voiceId);
@@ -113,11 +115,13 @@ const getEntryState = (index: number): EntryState => entryStatuses.get(index) ||
                     setTranslatedLang(foundLang);
 
                     const savedVoiceId = await window.api.getVoicePreference(project.path, foundLang);
-                    const presets = getPresetsForLanguage(foundLang);
-                    if (savedVoiceId && presets.some(p => p.id === savedVoiceId)) {
+                    const dynamicResponse = await window.api.getVoicesForLanguage(foundLang);
+                    const voices = dynamicResponse?.voices?.length ? dynamicResponse.voices : getPresetsForLanguage(foundLang);
+                    setAvailableVoices(voices);
+                    if (savedVoiceId && voices.some(p => p.id === savedVoiceId)) {
                         setSelectedVoiceId(savedVoiceId);
-                    } else if (presets.length > 0) {
-                        setSelectedVoiceId(presets[0].id);
+                    } else if (voices.length > 0) {
+                        setSelectedVoiceId(voices[0].id);
                     }
 
                     const savedConcurrency = await window.api.getConcurrencySettings(project.path);
@@ -352,6 +356,7 @@ const getEntryState = (index: number): EntryState => entryStatuses.get(index) ||
                         <VoiceSelector
                             selectedVoiceId={selectedVoiceId}
                             language={translatedLang}
+                            voices={availableVoices}
                             onVoiceChange={handleVoiceChange}
                             onShowAllVoices={() => setShowVoiceModal(true)}
                             onPreview={() => handlePreviewVoice(selectedVoiceId)}
@@ -561,6 +566,7 @@ const getEntryState = (index: number): EntryState => entryStatuses.get(index) ||
                     open={showVoiceModal}
                     selectedVoiceId={selectedVoiceId}
                     language={translatedLang}
+                    voices={availableVoices}
                     onSelectVoice={handleVoiceChange}
                     onClose={() => setShowVoiceModal(false)}
                     onPreview={handlePreviewVoice}

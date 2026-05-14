@@ -3,6 +3,7 @@ import { promisify } from 'util';
 import { stat } from 'fs/promises';
 import { VideoEncoder } from './VideoEncoder';
 import { EncodeOptions, EncodeResult } from '../types';
+import { getFfmpegPath } from '../../EnvironmentService';
 
 const execFileAsync = promisify(execFile);
 
@@ -40,9 +41,9 @@ export class CPUEncoder implements VideoEncoder {
         outputPath
       ];
 
-      await execFileAsync('ffmpeg', args, { 
+      await execFileAsync(getFfmpegPath(), args, { 
         maxBuffer: 10 * 1024 * 1024,
-        timeout: 120000 
+        timeout: 600000 // 10 min for CPU encoding
       });
 
       // Get output file stats
@@ -70,23 +71,20 @@ export class CPUEncoder implements VideoEncoder {
    * Get FFmpeg encoder arguments for CPU encoding
    */
   getEncoderArgs(options: EncodeOptions): string[] {
-    const speedFilter = options.videoSpeed !== 1.0 
-      ? `setpts=${(1 / options.videoSpeed).toFixed(6)}*PTS`
-      : null;
+    const videoFilter = Math.abs(options.videoSpeed - 1.0) > 0.001
+      ? `setpts=${(1 / options.videoSpeed).toFixed(6)}*(PTS-STARTPTS),fps=${options.fps}`
+      : `setpts=PTS-STARTPTS,fps=${options.fps}`;
 
     const args = [
+      '-an',
       '-c:v', 'libx264',
       '-preset', options.preset,
       '-crf', options.crf.toString(),
+      '-vf', videoFilter,
       '-r', options.fps.toString(),
       '-g', (options.fps * 2).toString(), // Keyframe every 2 seconds for smooth concat
       '-keyint_min', options.fps.toString() // Min keyframe interval
     ];
-
-    // Add video filter if needed
-    if (speedFilter) {
-      args.push('-vf', speedFilter);
-    }
 
     return args;
   }

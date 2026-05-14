@@ -4,6 +4,8 @@ import { optimizeSrtFile, parseSrt as parseSrtMain } from "../lib/SrtOptimizer";
 
 import { generateAllAudio, generateAudioSegment, generateVoicePreview, cleanupOldPreviews } from "../services/PiperService";
 import { resolveVoiceName, isLanguageSupported } from "../services/tts/VoiceCatalog";
+import { fetchEdgeVoices } from "../services/tts/EdgeVoiceCatalogService";
+import { buildVoiceCatalogWithDynamicVoices, getPresetsForLanguage } from "../services/tts/VoiceCatalog";
 import { TtsOutputManager } from "../services/tts/TtsOutputManager";
 import { SrtRepository } from "../services/tts/SrtRepository";
 import { getVoicePreference, setVoicePreference, loadProjectConfig, saveProjectConfig } from "../services/ProjectConfig";
@@ -371,5 +373,16 @@ export const setupAudioIpc = () => {
         config.concurrencySettings = settings;
         saveProjectConfig(projectPath, config);
         return { success: true };
+    });
+
+    ipcMain.handle("get-voices-for-language", async (_event, lang: string) => {
+        try {
+            const dynamicVoices = await fetchEdgeVoices();
+            const catalog = buildVoiceCatalogWithDynamicVoices(dynamicVoices);
+            return { success: true, voices: catalog.allVoices[lang] || getPresetsForLanguage(lang) };
+        } catch (error) {
+            console.error("Failed to fetch dynamic voices:", error);
+            return { success: true, voices: getPresetsForLanguage(lang) };
+        }
     });
 };

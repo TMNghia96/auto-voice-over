@@ -3,10 +3,11 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/u
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Volume2, Search } from 'lucide-react';
-import { getAllVoicesForLanguage, type VoiceOption } from '@/services/tts/VoiceCatalog';
+import type { VoiceOption } from '@/services/tts/VoiceCatalog';
 
 interface VoiceModalProps {
   language: string;
+  voices: VoiceOption[];
   selectedVoiceId: string;
   open: boolean;
   onClose: () => void;
@@ -16,6 +17,7 @@ interface VoiceModalProps {
 
 export const VoiceModal = ({
   language,
+  voices,
   selectedVoiceId,
   open,
   onClose,
@@ -25,7 +27,7 @@ export const VoiceModal = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [genderFilter, setGenderFilter] = useState<'All' | 'Male' | 'Female'>('All');
 
-  const allVoices = getAllVoicesForLanguage(language);
+  const allVoices = voices;
 
   const filteredVoices = allVoices.filter((voice) => {
     const matchesSearch = voice.name.toLowerCase().includes(searchQuery.toLowerCase()) ||

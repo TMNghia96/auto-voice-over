@@ -1,6 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { EncodeOptions } from '../../../../src/services/video/types';
 
+vi.mock('electron', () => ({
+  app: { isPackaged: false },
+}));
+
 vi.mock(import('child_process'), async (importOriginal) => ({
   ...(await importOriginal()),
 }));
@@ -118,7 +122,7 @@ describe('GPUEncoder', () => {
       expect(args).toContain('balanced');
     });
 
-    it('should include setpts filter for video speed', () => {
+    it('should reset timestamps and enforce CFR when changing speed', () => {
       const encoder = new GPUEncoder('nvidia');
       const options: EncodeOptions = {
         startTime: 0,
@@ -133,10 +137,10 @@ describe('GPUEncoder', () => {
 
       expect(args).toContain('-vf');
       const vfIndex = args.indexOf('-vf');
-      expect(args[vfIndex + 1]).toBe('setpts=2.000000*PTS');
+      expect(args[vfIndex + 1]).toBe('setpts=2.000000*(PTS-STARTPTS),fps=30');
     });
 
-    it('should not include filter when speed is 1.0', () => {
+    it('should reset timestamps and enforce CFR when speed is 1.0', () => {
       const encoder = new GPUEncoder('nvidia');
       const options: EncodeOptions = {
         startTime: 0,
@@ -149,7 +153,9 @@ describe('GPUEncoder', () => {
 
       const args = encoder.getEncoderArgs(options);
 
-      expect(args).not.toContain('-vf');
+      expect(args).toContain('-vf');
+      const vfIndex = args.indexOf('-vf');
+      expect(args[vfIndex + 1]).toBe('setpts=PTS-STARTPTS,fps=30');
     });
   });
 });

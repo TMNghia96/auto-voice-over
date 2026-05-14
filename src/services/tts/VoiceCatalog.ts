@@ -209,3 +209,26 @@ export function isLanguageSupported(langCode: string): boolean {
 export function getSupportedLanguages(): string[] {
   return Object.keys(DEFAULT_VOICE_MAP);
 }
+
+export function buildVoiceCatalogWithDynamicVoices(dynamicVoices: VoiceOption[]): {
+  presets: Record<string, VoiceOption[]>;
+  allVoices: Record<string, VoiceOption[]>;
+} {
+  const allVoices: Record<string, VoiceOption[]> = { ...ALL_VOICES };
+  const grouped: Record<string, VoiceOption[]> = {};
+
+  for (const voice of dynamicVoices) {
+    if (!grouped[voice.language]) grouped[voice.language] = [];
+    grouped[voice.language].push(voice);
+  }
+
+  for (const lang of Object.keys(grouped)) {
+    allVoices[lang] = Array.from(new Map(grouped[lang].map((v) => [v.id, v])).values())
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }
+
+  return {
+    presets: VOICE_PRESETS,
+    allVoices,
+  };
+}

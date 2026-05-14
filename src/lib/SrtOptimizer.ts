@@ -21,10 +21,11 @@ const timeToMs = (time: string): number => {
  * Convert milliseconds to SRT timestamp format
  */
 export const msToTime = (ms: number): string => {
-    const h = Math.floor(ms / 3600000);
-    const m = Math.floor((ms % 3600000) / 60000);
-    const s = Math.floor((ms % 60000) / 1000);
-    const msPart = ms % 1000;
+    const roundedMs = Math.max(0, Math.round(ms));
+    const h = Math.floor(roundedMs / 3600000);
+    const m = Math.floor((roundedMs % 3600000) / 60000);
+    const s = Math.floor((roundedMs % 60000) / 1000);
+    const msPart = roundedMs % 1000;
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')},${String(msPart).padStart(3, '0')}`;
 };
 

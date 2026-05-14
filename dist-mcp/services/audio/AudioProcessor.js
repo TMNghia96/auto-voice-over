@@ -1,0 +1,294 @@
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.AudioProcessor = exports.cancelAudioProcessing = void 0;
+const path_1 = __importDefault(require("path"));
+const fs_1 = __importDefault(require("fs"));
+const child_process_1 = require("child_process");
+const p_limit_1 = __importDefault(require("p-limit"));
+const EnvironmentService_1 = require("../EnvironmentService");
+let activeProcesses = [];
+let isCancelled = false;
+const cancelAudioProcessing = () => {
+    isCancelled = true;
+    for (const proc of activeProcesses) {
+        try {
+            if (process.platform === 'win32' && proc.pid) {
+                const { exec } = require('child_process');
+                exec(`taskkill /pid ${proc.pid} /t /f`);
+            }
+            else {
+                proc.kill('SIGKILL');
+            }
+        }
+        catch (e) { }
+    }
+    activeProcesses = [];
+};
+exports.cancelAudioProcessing = cancelAudioProcessing;
+const getAtempoFilter = (speed) => {
+    if (Math.abs(speed - 1.0) < 0.001)
+        return '';
+    let r = speed;
+    const stack = [];
+    while (r > 2.0) {
+        stack.push('atempo=2.0');
+        r /= 2.0;
+    }
+    while (r < 0.5) {
+        stack.push('atempo=0.5');
+        r /= 0.5;
+    }
+    if (Math.abs(r - 1.0) > 0.001)
+        stack.push(`atempo=${r.toFixed(4)}`);
+    return stack.join(',');
+};
+const getMediaDuration = async (filePath) => {
+    return new Promise((resolve) => {
+        const ffmpeg = (0, EnvironmentService_1.getFfmpegPath)();
+        const proc = (0, child_process_1.spawn)(ffmpeg, ['-i', filePath, '-f', 'null', '-'], { windowsHide: true });
+        let stderr = '';
+        proc.stderr.on('data', (data) => stderr += data.toString());
+        proc.on('close', () => {
+            const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/);
+            if (match) {
+                const hours = parseInt(match[1]);
+                const minutes = parseInt(match[2]);
+                const seconds = parseInt(match[3]);
+                const decimals = parseFloat(`0.${match[4]}`);
+                resolve(hours * 3600 + minutes * 60 + seconds + decimals);
+            }
+            else {
+                resolve(0);
+            }
+        });
+        proc.on('error', () => resolve(0));
+    });
+};
+class AudioProcessor {
+    duckVolume;
+    ffmpegPath;
+    constructor(ffmpegPath, duckVolume = 0.15) {
+        this.ffmpegPath = ffmpegPath;
+        this.duckVolume = duckVolume;
+    }
+    runFfmpeg(args) {
+        return new Promise((resolve) => {
+            if (isCancelled)
+                return resolve({ success: false, stderr: 'Cancelled' });
+            const proc = (0, child_process_1.spawn)(this.ffmpegPath, args, { windowsHide: true });
+            activeProcesses.push(proc);
+            let stderr = '';
+            proc.stderr.on('data', (data) => {
+                stderr += data.toString();
+            });
+            proc.on('close', (code) => {
+                activeProcesses = activeProcesses.filter(p => p !== proc);
+                resolve({ success: code === 0, stderr });
+            });
+            proc.on('error', (err) => {
+                activeProcesses = activeProcesses.filter(p => p !== proc);
+                resolve({ success: false, stderr: err.message });
+            });
+        });
+    }
+    getMediaDuration(filePath) {
+        return new Promise((resolve) => {
+            const proc = (0, child_process_1.spawn)(this.ffmpegPath, ['-i', filePath, '-f', 'null', '-'], { windowsHide: true });
+            let stderr = '';
+            proc.stderr.on('data', (data) => stderr += data.toString());
+            proc.on('close', () => {
+                const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/);
+                if (match) {
+                    const hours = parseInt(match[1]);
+                    const minutes = parseInt(match[2]);
+                    const seconds = parseInt(match[3]);
+                    const decimals = parseFloat(`0.${match[4]}`);
+                    resolve(hours * 3600 + minutes * 60 + seconds + decimals);
+                }
+                else {
+                    resolve(0);
+                }
+            });
+            proc.on('error', () => resolve(0));
+        });
+    }
+    async processAudioSegments(segments, fullAudioWav, tempDir, onProgress) {
+        // Dynamic CONCURRENCY based on available memory
+        const os = require('os');
+        const freeMemory = os.freemem();
+        const freeMemoryGB = freeMemory / (1024 * 1024 * 1024);
+        // Check minimum memory requirement
+        if (freeMemoryGB < 1.5) {
+            throw new Error(`Không đủ RAM! Cần ít nhất 1.5GB RAM trống. Hiện tại: ${freeMemoryGB.toFixed(2)}GB`);
+        }
+        // Dynamic concurrency: 4GB+ → 4 concurrent, 2-4GB → 2 concurrent, <2GB → 1 concurrent
+        const CONCURRENCY = freeMemoryGB > 4 ? 4 : (freeMemoryGB > 2 ? 2 : 1);
+        console.log(`[Memory] Free: ${freeMemoryGB.toFixed(2)}GB, CONCURRENCY: ${CONCURRENCY}`);
+        const segmentPaths = new Array(segments.length).fill(null);
+        const segmentTimings = new Array(segments.length).fill(null);
+        let completed = 0;
+        let processError = null;
+        const processAudioSegment = async (seg, idx) => {
+            if (isCancelled)
+                throw new Error("Cancelled by user");
+            if (processError)
+                throw new Error(processError);
+            const outSegWav = path_1.default.join(tempDir, `audio_seg_${String(idx).padStart(4, '0')}.wav`);
+            const targetDurFixed = seg.targetDuration.toFixed(4);
+            const startFixed = seg.videoStart.toFixed(4);
+            const origDurFixed = seg.videoDuration.toFixed(4);
+            if (seg.type === 'gap') {
+                // Gap segments: constant duck volume (same as dubbed background)
+                const res = await this.runFfmpeg([
+                    '-y', '-ss', startFixed, '-t', origDurFixed, '-i', fullAudioWav,
+                    '-af', `volume=${this.duckVolume}`,
+                    '-c:a', 'pcm_s16le', outSegWav
+                ]);
+                if (!res.success) {
+                    const error = `Lỗi cắt âm Gap (t=${startFixed}): ${res.stderr}`;
+                    processError = error;
+                    throw new Error(error);
+                }
+                segmentPaths[idx] = outSegWav;
+                // Measure actual duration for sync tracking
+                const actualDuration = await this.getMediaDuration(outSegWav);
+                segmentTimings[idx] = {
+                    expectedDuration: seg.targetDuration,
+                    actualDuration: actualDuration,
+                    drift: actualDuration - seg.targetDuration
+                };
+                // Debug: Log detailed timing info for gap segment
+                console.log(`[Audio] Segment ${idx} (${seg.type}): videoDur=${seg.videoDuration.toFixed(3)}s, targetDur=${seg.targetDuration.toFixed(3)}s, actualDur=${actualDuration.toFixed(3)}s, drift=${(actualDuration - seg.targetDuration).toFixed(3)}s`);
+            }
+            else {
+                // Dubbed
+                if (!seg.audioPath || !seg.audioDuration || seg.audioDuration === 0) {
+                    const res = await this.runFfmpeg([
+                        '-y', '-ss', startFixed, '-t', origDurFixed, '-i', fullAudioWav,
+                        '-c:a', 'pcm_s16le', outSegWav
+                    ]);
+                    if (!res.success) {
+                        const error = `Lỗi Fallback Gap (t=${startFixed}): ${res.stderr}`;
+                        processError = error;
+                        throw new Error(error);
+                    }
+                    segmentPaths[idx] = outSegWav;
+                    // Measure actual duration for sync tracking (fallback case)
+                    const actualDuration = await this.getMediaDuration(outSegWav);
+                    segmentTimings[idx] = {
+                        expectedDuration: seg.targetDuration,
+                        actualDuration: actualDuration,
+                        drift: actualDuration - seg.targetDuration
+                    };
+                    // Debug: Log detailed timing info for fallback segment
+                    console.log(`[Audio] Segment ${idx} (fallback): videoDur=${seg.videoDuration.toFixed(3)}s, targetDur=${seg.targetDuration.toFixed(3)}s, actualDur=${actualDuration.toFixed(3)}s, drift=${(actualDuration - seg.targetDuration).toFixed(3)}s`);
+                    completed++;
+                    const pct = Math.round((completed / segments.length) * 100);
+                    onProgress(pct);
+                    return;
+                }
+                // Tính toán atempo cho background và dubbed
+                const bgSpeed = 1.0 / seg.videoSpeed;
+                const bgAtempo = getAtempoFilter(bgSpeed);
+                const dubbedAtempo = getAtempoFilter(seg.audioSpeed);
+                // Quan trọng: Thêm aresample=44100 để đồng bộ mọi stream trước khi mix
+                const bgFilter = bgAtempo ? `aresample=44100,${bgAtempo},volume=${this.duckVolume}` : `aresample=44100,volume=${this.duckVolume}`;
+                const dubbedFilter = dubbedAtempo ? `aresample=44100,${dubbedAtempo},apad` : 'aresample=44100,apad';
+                const res = await this.runFfmpeg([
+                    '-y',
+                    '-ss', startFixed, '-t', origDurFixed, '-i', fullAudioWav, // 0:a = Background Audio chunk
+                    '-i', seg.audioPath, // 1:a = Dubbed Audio
+                    '-filter_complex', `[0:a]${bgFilter}[bg];[1:a]${dubbedFilter}[v];[bg][v]amix=inputs=2:duration=first:dropout_transition=0,volume=2[out]`,
+                    '-map', '[out]',
+                    '-c:a', 'pcm_s16le',
+                    '-ar', '44100',
+                    '-t', targetDurFixed, // Đảm bảo output có độ dài chính xác targetDuration (sau khi đã co giãn)
+                    outSegWav
+                ]);
+                if (!res.success) {
+                    const error = `Lỗi Mix Dubbed #${seg.index}: ${res.stderr}`;
+                    processError = error;
+                    throw new Error(error);
+                }
+                segmentPaths[idx] = outSegWav;
+                // Measure actual duration for sync tracking
+                const actualDuration = await this.getMediaDuration(outSegWav);
+                segmentTimings[idx] = {
+                    expectedDuration: seg.targetDuration,
+                    actualDuration: actualDuration,
+                    drift: actualDuration - seg.targetDuration
+                };
+                // Debug: Log detailed timing info for each segment
+                console.log(`[Audio] Segment ${idx} (${seg.type}): videoDur=${seg.videoDuration.toFixed(3)}s, targetDur=${seg.targetDuration.toFixed(3)}s, actualDur=${actualDuration.toFixed(3)}s, drift=${(actualDuration - seg.targetDuration).toFixed(3)}s`);
+            }
+            completed++;
+            const pct = Math.round((completed / segments.length) * 100);
+            onProgress(pct);
+        };
+        // Use p-limit for concurrency control
+        const limit = (0, p_limit_1.default)(CONCURRENCY);
+        const promises = segments.map((seg, idx) => limit(async () => {
+            if (isCancelled)
+                throw new Error("Cancelled by user");
+            await processAudioSegment(seg, idx);
+        }));
+        try {
+            await Promise.all(promises);
+        }
+        catch (err) {
+            if (err.message === "Cancelled by user") {
+                throw err;
+            }
+            // If there's a processError, use it; otherwise use the caught error
+            if (processError) {
+                throw new Error(processError);
+            }
+            throw err;
+        }
+        const validPaths = segmentPaths.filter((p) => p !== null);
+        if (validPaths.length !== segments.length) {
+            throw new Error('Mất mát / Lỗi khi render phân đoạn âm thanh!');
+        }
+        // Track cumulative drift
+        let cumulativeDrift = 0;
+        const CORRECTION_INTERVAL = 10;
+        const DRIFT_THRESHOLD = 0.05;
+        for (let i = 0; i < segmentTimings.length; i++) {
+            if (!segmentTimings[i])
+                continue;
+            cumulativeDrift += segmentTimings[i].drift;
+            if ((i + 1) % CORRECTION_INTERVAL === 0 && Math.abs(cumulativeDrift) > DRIFT_THRESHOLD) {
+                console.log(`[Sync] Cumulative drift at segment ${i}: ${cumulativeDrift.toFixed(3)}s`);
+            }
+        }
+        // Build array of actual durations from segmentTimings
+        const actualDurations = segmentTimings.map((timing, idx) => {
+            if (timing) {
+                return timing.actualDuration;
+            }
+            return segments[idx].targetDuration;
+        });
+        return {
+            segmentPaths: validPaths,
+            actualDurations
+        };
+    }
+    async concatenateAudio(segmentPaths, tempDir) {
+        const listPath = path_1.default.join(tempDir, 'concat_list.txt');
+        const listContent = segmentPaths.map(p => `file '${p.replace(/\\/g, '/')}'`).join('\n');
+        fs_1.default.writeFileSync(listPath, listContent, 'utf-8');
+        const finalAudioWav = path_1.default.join(tempDir, 'final_mixed_audio.wav');
+        const concatRes = await this.runFfmpeg([
+            '-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c:a', 'copy', finalAudioWav
+        ]);
+        if (!concatRes.success || !fs_1.default.existsSync(finalAudioWav)) {
+            throw new Error(`Lỗi kết nối âm thanh: ${concatRes.stderr}`);
+        }
+        return finalAudioWav;
+    }
+}
+exports.AudioProcessor = AudioProcessor;
+//# sourceMappingURL=AudioProcessor.js.map

@@ -20,6 +20,17 @@ export interface VideoInfo {
     isLive: boolean;
 }
 
+export interface VideoFormat {
+    id: string;
+    ext: string;
+    resolution: string;
+    codec: string;
+    filesize: string;
+    bitrate: string;
+    fps: string;
+    note: string;
+}
+
 interface YtDlpDumpJson {
     title?: string;
     thumbnail?: string;
@@ -101,10 +112,49 @@ export const getVideoInfo = async (url: string): Promise<VideoInfo | null> => {
     });
 };
 
+export const getVideoFormats = async (url: string): Promise<VideoFormat[]> => {
+    return new Promise((resolve) => {
+        try {
+            const ytDlpPath = getYtDlpPath();
+            const proc = spawn(ytDlpPath, [
+                '-F',
+                '--print', '%(format_id)s|%(ext)s|%(resolution)s|%(vcodec)s|%(filesize_approx)s|%(tbr)s|%(fps)s|%(format_note)s',
+                url
+            ]);
+
+            let stdout = '';
+            proc.stdout.on('data', (data) => stdout += data.toString());
+
+            proc.on('close', (code) => {
+                if (code !== 0) {
+                    resolve([]);
+                    return;
+                }
+                const formats: VideoFormat[] = [];
+                const lines = stdout.trim().split('\n');
+                for (const line of lines) {
+                    const parts = line.split('|');
+                    if (parts.length < 8) continue;
+                    const [id, ext, resolution, codec, filesize, bitrate, fps, note] = parts;
+                    // Only show formats with video
+                    if (resolution === 'audio only' || !resolution) continue;
+                    formats.push({ id: id.trim(), ext, resolution, codec, filesize, bitrate, fps, note });
+                }
+                resolve(formats);
+            });
+
+            proc.on('error', () => resolve([]));
+        } catch {
+            resolve([]);
+        }
+    });
+};
+
 export const downloadVideo = async (
     url: string,
     projectPath: string,
-    onProgress: (progress: { video: number, audio: number }) => void
+    onProgress: (progress: { video: number, audio: number }) => void,
+    formatId?: string
 ): Promise<boolean> => {
     return new Promise((resolve) => {
         try {
@@ -120,11 +170,13 @@ export const downloadVideo = async (
             let audioProgress = 0;
             let videoFinished = false;
             let audioFinished = false;
+            let videoSucceeded = false;
+            let audioSucceeded = false;
 
             const checkDone = () => {
                 if (videoFinished && audioFinished) {
                     onProgress({ video: 100, audio: 100 });
-                    resolve(true);
+                    resolve(videoSucceeded && audioSucceeded);
                 }
             };
 
@@ -140,8 +192,9 @@ export const downloadVideo = async (
                 return null;
             };
 
+            const videoFormat = formatId || 'bestvideo[ext=mp4][vcodec^=avc1]/bestvideo[ext=mp4]/bestvideo';
             const videoProc = spawn(ytDlpPath, [
-                '-f', 'bestvideo[ext=mp4]/bestvideo',
+                '-f', videoFormat,
                 '--ffmpeg-location', ffmpegPath,
                 '-o', path.join(videoDir, '%(id)s.%(ext)s'),
                 '--newline',
@@ -169,7 +222,8 @@ export const downloadVideo = async (
 
             videoProc.on('close', (code) => {
                 console.log('Video download finished, exit code:', code);
-                videoProgress = 100;
+                videoSucceeded = code === 0;
+                videoProgress = videoSucceeded ? 100 : 0;
                 videoFinished = true;
                 reportProgress();
                 checkDone();
@@ -178,6 +232,7 @@ export const downloadVideo = async (
             videoProc.on('error', (err) => {
                 console.error('Video download error:', err);
                 videoFinished = true; // Mark finished to avoid hanging? Or resolve false?
+                videoSucceeded = false;
                 videoProgress = 0; // or 100?
                 checkDone();
             });
@@ -213,7 +268,8 @@ export const downloadVideo = async (
 
             audioProc.on('close', (code) => {
                 console.log('Audio download finished, exit code:', code);
-                audioProgress = 100;
+                audioSucceeded = code === 0;
+                audioProgress = audioSucceeded ? 100 : 0;
                 audioFinished = true;
                 reportProgress();
                 checkDone();
@@ -222,6 +278,7 @@ export const downloadVideo = async (
             audioProc.on('error', (err) => {
                 console.error('Audio download error:', err);
                 audioFinished = true;
+                audioSucceeded = false;
                 checkDone();
             });
 

@@ -7,10 +7,11 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Button } from '@/components/ui/button';
-import { getPresetsForLanguage } from '@/services/tts/VoiceCatalog';
+import type { VoiceOption } from '@/services/tts/VoiceCatalog';
 
 export interface VoiceSelectorProps {
   language: string;
+  voices: VoiceOption[];
   selectedVoiceId: string;
   onVoiceChange: (voiceId: string) => void;
   onPreview?: () => void;
@@ -21,6 +22,7 @@ export interface VoiceSelectorProps {
 
 export function VoiceSelector({
   language,
+  voices,
   selectedVoiceId,
   onVoiceChange,
   onPreview,
@@ -28,7 +30,7 @@ export function VoiceSelector({
   disabled,
   isPreviewPlaying,
 }: VoiceSelectorProps) {
-  const presets = getPresetsForLanguage(language);
+  const presets = voices;
 
   return (
     <div className="flex items-center gap-2">

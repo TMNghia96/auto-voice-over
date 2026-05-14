@@ -107,3 +107,9 @@ check_gh2.ts
 test_vulkan.ts
 *.mts.timestamp*
 whisper_vulkan_build/
+debug_archive/
+graphify-out/
+.agents/
+.auto-voice-over/
+.opencode/
+src_dead_code.json

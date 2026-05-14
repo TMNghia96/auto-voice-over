@@ -4,6 +4,7 @@ import { parseSrt, timeToSeconds } from '../../lib/SrtOptimizer';
 import { Segment } from '../video/types';
 import { spawn } from 'child_process';
 import { getFfmpegPath } from '../EnvironmentService';
+import pLimit from 'p-limit';
 
 const MAX_AUDIO_SPEEDUP = 1.4;
 
@@ -13,17 +14,24 @@ const MAX_AUDIO_SPEEDUP = 1.4;
  */
 export class AudioSegmentBuilder {
   /**
-   * Get media duration using FFmpeg
+   * Get media duration using FFmpeg with timeout
    */
-  private async getMediaDuration(filePath: string): Promise<number> {
+  private getMediaDuration(filePath: string): Promise<number> {
     return new Promise((resolve) => {
       const ffmpeg = getFfmpegPath();
       const proc = spawn(ffmpeg, ['-i', filePath, '-f', 'null', '-'], { windowsHide: true });
+
+      const timeout = setTimeout(() => {
+        try { proc.kill('SIGKILL'); } catch {}
+        console.warn(`[AudioSegmentBuilder] Timeout reading ${filePath}`);
+        resolve(0);
+      }, 8000);
 
       let stderr = '';
       proc.stderr.on('data', (data) => stderr += data.toString());
 
       proc.on('close', () => {
+        clearTimeout(timeout);
         const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/);
         if (match) {
           const hours = parseInt(match[1]);
@@ -35,7 +43,11 @@ export class AudioSegmentBuilder {
           resolve(0);
         }
       });
-      proc.on('error', () => resolve(0));
+      proc.on('error', (err) => {
+        clearTimeout(timeout);
+        console.warn(`[AudioSegmentBuilder] FFmpeg error for ${filePath}:`, err.message);
+        resolve(0);
+      });
     });
   }
 
@@ -65,6 +77,27 @@ export class AudioSegmentBuilder {
     // Read SRT content
     const srtContent = fs.readFileSync(srtPath, 'utf-8');
     const entries = parseSrt(srtContent);
+    
+    // ✅ Pre-fetch all audio durations in parallel (with concurrency limit)
+    console.log(`[AudioSegmentBuilder] Pre-fetching durations for ${entries.length} audio files...`);
+    const audioDurationMap = new Map<number, number>();
+    const limit = pLimit(10); // Limit to 10 concurrent ffmpeg processes
+    const durationPromises = entries.map(async (entry) => {
+      const audioFileName = `${String(entry.index).padStart(4, '0')}.mp3`;
+      const audioPath = path.join(audioDir, audioFileName);
+      if (fs.existsSync(audioPath)) {
+        try {
+          const duration = await limit(() => this.getMediaDuration(audioPath));
+          audioDurationMap.set(entry.index, duration);
+        } catch (err) {
+          console.warn(`[AudioSegmentBuilder] Failed to get duration for ${audioFileName}:`, err);
+          audioDurationMap.set(entry.index, 0);
+        }
+      }
+    });
+    await Promise.all(durationPromises);
+    console.log(`[AudioSegmentBuilder] ✅ Fetched ${audioDurationMap.size} audio durations`);
+
     const segments: Segment[] = [];
 
     for (let i = 0; i < entries.length; i++) {
@@ -91,10 +124,7 @@ export class AudioSegmentBuilder {
 
       const audioFileName = `${String(entry.index).padStart(4, '0')}.mp3`;
       const audioPath = path.join(audioDir, audioFileName);
-      let audioDuration = 0;
-      if (fs.existsSync(audioPath)) {
-        audioDuration = await this.getMediaDuration(audioPath);
-      }
+      const audioDuration = audioDurationMap.get(entry.index) || 0;
 
       const originalDuration = entryEnd - entryStart;
       let targetDuration = originalDuration;

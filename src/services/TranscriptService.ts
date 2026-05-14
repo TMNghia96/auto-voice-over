@@ -207,7 +207,7 @@ const findAudioFile = (projectPath: string): string | null => {
 export const transcribeAudio = async (
     projectPath: string,
     onProgress: ProgressCallback,
-    engine: TranscriptEngine = 'whisper-cpu',
+    engine: TranscriptEngine = 'whisper-openblas',
     language = 'auto'
 ): Promise<{ srtPath: string; srtContent: string } | null> => {
     try {

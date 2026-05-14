@@ -2,6 +2,7 @@ import path from 'path';
 import fs from 'fs';
 import { spawn } from 'child_process';
 import pLimit from 'p-limit';
+import { getFfmpegPath } from '../EnvironmentService';
 
 interface Segment {
     type: 'dubbed' | 'gap';

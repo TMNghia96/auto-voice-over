@@ -25,30 +25,41 @@ export class EncoderFactory {
 
     if (this.preference === 'cpu') {
       // User explicitly wants CPU
+      console.log('[EncoderFactory] User preference: CPU');
       encoder = new CPUEncoder();
     } else if (this.preference === 'gpu') {
       // User explicitly wants GPU, try GPU or fail to CPU
+      console.log('[EncoderFactory] User preference: GPU, detecting...');
       const gpuType = await this.detectGPU();
       if (gpuType) {
+        console.log(`[EncoderFactory] ✅ GPU detected: ${gpuType.toUpperCase()}`);
         encoder = new GPUEncoder(gpuType);
         if (await encoder.isAvailable()) {
+          console.log(`[EncoderFactory] ✅ GPU encoder available: ${encoder.name}`);
           this.encoderCache = encoder;
           return encoder;
+        } else {
+          console.warn(`[EncoderFactory] ⚠️ GPU encoder NOT available, falling back to CPU`);
         }
+      } else {
+        console.warn('[EncoderFactory] ⚠️ No GPU detected, falling back to CPU');
       }
       // GPU not available, fallback to CPU
       encoder = new CPUEncoder();
     } else {
       // Auto mode: try GPU first, fallback to CPU
+      console.log('[EncoderFactory] Auto mode, trying GPU first...');
       const gpuType = await this.detectGPU();
       if (gpuType) {
         const gpuEncoder = new GPUEncoder(gpuType);
         if (await gpuEncoder.isAvailable()) {
+          console.log(`[EncoderFactory] ✅ Using GPU: ${gpuType.toUpperCase()}`);
           encoder = gpuEncoder;
           this.encoderCache = encoder;
           return encoder;
         }
       }
+      console.log('[EncoderFactory] Using CPU encoder');
       // No GPU available, use CPU
       encoder = new CPUEncoder();
     }

@@ -10,6 +10,17 @@ import { useProcessContext } from "@/stores/ProcessStore";
 type InputMode = "choose" | "url" | "local";
 type Phase = "input" | "review" | "downloading" | "importing" | "completed";
 
+interface VideoFormat {
+    id: string;
+    ext: string;
+    resolution: string;
+    codec: string;
+    filesize: string;
+    bitrate: string;
+    fps: string;
+    note: string;
+}
+
 export const InputPhase = ({ onComplete }: { onComplete?: () => void }) => {
     const { id } = useParams();
     const [phase, setPhase] = useState<Phase>("input");
@@ -23,6 +34,9 @@ export const InputPhase = ({ onComplete }: { onComplete?: () => void }) => {
     const [localFilePath, setLocalFilePath] = useState("");
     const [localFileName, setLocalFileName] = useState("");
     const [isChecking, setIsChecking] = useState(true);
+    const [formats, setFormats] = useState<VideoFormat[]>([]);
+    const [selectedFormatId, setSelectedFormatId] = useState<string>("");
+    const [loadingFormats, setLoadingFormats] = useState(false);
 
     const { setIsProcessing: setGlobalProcessing } = useProcessContext();
 
@@ -123,6 +137,15 @@ export const InputPhase = ({ onComplete }: { onComplete?: () => void }) => {
             const info = await window.api.getVideoInfo(url);
             if (info) {
                 setVideoInfo(info);
+                // Fetch available formats
+                setLoadingFormats(true);
+                setFormats([]);
+                const fmts = await window.api.getVideoFormats(url);
+                setFormats(fmts || []);
+                // Auto-select first H264 format, or first format
+                const h264 = fmts?.find((f: VideoFormat) => f.codec?.includes('avc1') || f.codec?.includes('h264'));
+                setSelectedFormatId(h264?.id || fmts?.[0]?.id || "");
+                setLoadingFormats(false);
                 setPhase("review");
             } else {
                 alert("Không tìm thấy thông tin video hoặc URL không hợp lệ");
@@ -150,7 +173,7 @@ export const InputPhase = ({ onComplete }: { onComplete?: () => void }) => {
             return;
         }
         setPhase("downloading");
-        window.api.downloadVideo(videoInfo.url, projectPath);
+        window.api.downloadVideo(videoInfo.url, projectPath, selectedFormatId || undefined);
     };
 
     const handleSelectLocalFile = async () => {
@@ -360,6 +383,57 @@ export const InputPhase = ({ onComplete }: { onComplete?: () => void }) => {
                                 <h3 className="font-bold text-xl leading-tight mb-2">{videoInfo.title}</h3>
                                 <p className="text-secondary-foreground font-medium">{videoInfo.author}</p>
                             </div>
+
+                            {/* Format selector */}
+                            {loadingFormats ? (
+                                <div className="flex items-center gap-2 text-sm text-muted-foreground py-2">
+                                    <Spinner className="w-4 h-4" />
+                                    Đang tải danh sách định dạng...
+                                </div>
+                            ) : formats.length > 0 ? (
+                                <div className="border-t pt-4">
+                                    <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-2 block">
+                                        Chọn định dạng video
+                                    </label>
+                                    <div className="space-y-1 max-h-[200px] overflow-y-auto">
+                                        {formats.map((f) => (
+                                            <label
+                                                key={f.id}
+                                                className={`flex items-center justify-between p-2 rounded-lg cursor-pointer border transition-colors ${
+                                                    selectedFormatId === f.id
+                                                        ? 'border-primary bg-primary/5'
+                                                        : 'border-transparent hover:bg-muted'
+                                                }`}
+                                            >
+                                                <div className="flex items-center gap-3">
+                                                    <input
+                                                        type="radio"
+                                                        name="format"
+                                                        value={f.id}
+                                                        checked={selectedFormatId === f.id}
+                                                        onChange={() => setSelectedFormatId(f.id)}
+                                                        className="accent-primary"
+                                                    />
+                                                    <div>
+                                                        <span className="font-medium text-sm">
+                                                            {f.resolution}
+                                                            {f.fps && f.fps !== '0' ? ` ${f.fps}fps` : ''}
+                                                        </span>
+                                                        <span className="text-xs text-muted-foreground ml-2">
+                                                            {f.codec?.toUpperCase()} {f.ext}
+                                                            {f.note ? ` · ${f.note}` : ''}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                                <span className="text-xs text-muted-foreground font-mono shrink-0">
+                                                    {f.filesize ? `${(parseInt(f.filesize) / 1024 / 1024).toFixed(0)}MB` : '?'}
+                                                </span>
+                                            </label>
+                                        ))}
+                                    </div>
+                                </div>
+                            ) : null}
+
                             <div className="text-sm text-muted-foreground whitespace-pre-line border-t pt-4">
                                 {videoInfo.description ? videoInfo.description.slice(0, 300) + (videoInfo.description.length > 300 ? '...' : '') : "Không có mô tả."}
                             </div>
