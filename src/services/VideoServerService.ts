@@ -1,6 +1,7 @@
 import * as http from "http";
 import * as url from "url";
 import fs from "fs";
+import { assertVideoFile, PathSecurityError } from "./PathSecurity";
 
 const activeStreams = new Set<{ filePath: string; stream: fs.ReadStream }>();
 
@@ -26,6 +27,20 @@ export const closeStreamsForPath = (pathPrefix: string): void => {
 
 export const startVideoServer = () => {
     return new Promise<void>((resolve) => {
+        const videoHeaders = (req: http.IncomingMessage, extra: Record<string, string | number> = {}) => {
+            const origin = req.headers.origin;
+            const headers: Record<string, string | number> = {
+                "Accept-Ranges": "bytes",
+                "Content-Type": "video/mp4",
+                ...extra,
+            };
+            if (typeof origin === "string" && /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(origin)) {
+                headers["Access-Control-Allow-Origin"] = origin;
+                headers["Vary"] = "Origin";
+            }
+            return headers;
+        };
+
         const server = http.createServer((req, res) => {
             if (!req.url) {
                 res.writeHead(404);
@@ -35,16 +50,24 @@ export const startVideoServer = () => {
 
             const parsedUrl = url.parse(req.url, true);
             if (parsedUrl.pathname === "/video") {
-                const filePath = parsedUrl.query.path as string;
+                const requestedPath = parsedUrl.query.path as string;
 
-                if (!filePath) {
+                if (!requestedPath) {
                     res.writeHead(400);
                     res.end("Missing path parameter");
                     return;
                 }
 
-                if (!fs.existsSync(filePath)) {
-                    console.error(`Video file not found: ${filePath}`);
+                let filePath: string;
+                try {
+                    filePath = assertVideoFile(requestedPath);
+                } catch (error) {
+                    if (error instanceof PathSecurityError) {
+                        res.writeHead(403);
+                        res.end("Forbidden");
+                        return;
+                    }
+                    console.error(`Video file not found: ${requestedPath}`);
                     res.writeHead(404);
                     res.end("File not found");
                     return;
@@ -78,22 +101,16 @@ export const startVideoServer = () => {
                         }
 
                         const chunksize = end - start + 1;
-                        res.writeHead(206, {
+                        res.writeHead(206, videoHeaders(req, {
                             "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-                            "Accept-Ranges": "bytes",
                             "Content-Length": chunksize,
-                            "Content-Type": "video/mp4",
-                            "Access-Control-Allow-Origin": "*",
-                        });
+                        }));
 
                         readStream = fs.createReadStream(filePath, { start, end });
                     } else {
-                        res.writeHead(200, {
+                        res.writeHead(200, videoHeaders(req, {
                             "Content-Length": fileSize,
-                            "Accept-Ranges": "bytes",
-                            "Content-Type": "video/mp4",
-                            "Access-Control-Allow-Origin": "*",
-                        });
+                        }));
                         readStream = fs.createReadStream(filePath);
                     }
 

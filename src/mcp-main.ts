@@ -2,6 +2,9 @@ import { app } from "electron";
 import { connectDB } from "./services/DatabaseService";
 import { startVideoServer } from "./services/VideoServerService";
 import { mcpService } from "./services/McpService";
+import { configureAppIdentity } from "./services/AppPaths";
+
+configureAppIdentity();
 
 const run = async () => {
   console.log("[MCP Main] Booting standalone MCP process...");

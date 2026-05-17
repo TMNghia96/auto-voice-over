@@ -1,15 +1,18 @@
 import path from "path";
 import fs from "fs";
-import { addProject } from "./DatabaseService";
-import { createProjectFolder, getApiKey, getActivePromptId, getPrompts } from "./ConfigService";
-import { downloadVideo } from "./VideoService";
+import { upsertProject } from "./DatabaseService";
+import { createProjectFolder, getApiKey } from "./ConfigService";
+import { downloadVideo, getVideoInfo } from "./VideoService";
 import { transcribeAudio, TranscriptEngine } from "./TranscriptService";
 import { createFinalVideo } from "./FinalVideoService";
 import { generateAllAudio } from "./PiperService";
-import { parseSrt, stringifySrt, TARGET_LANGUAGES } from "../lib/utils";
+import { parseSrt, stringifySrt } from "../lib/utils";
 import { SrtRepository } from "./tts/SrtRepository";
 import { TtsOutputManager } from "./tts/TtsOutputManager";
 import { loadProjectConfig } from "./ProjectConfig";
+import { translateSegments } from "./TranslationService";
+import { sanitizeProjectName } from "./PathSecurity";
+import { syncProjectArtifactMetadata } from "./ProjectArtifacts";
 
 export const PIPELINE_STEPS = ["create_project", "download_video", "transcribe", "translate", "generate_audio", "create_final_video"] as const;
 export type PipelineStep = typeof PIPELINE_STEPS[number];
@@ -121,26 +124,50 @@ export class PipelineOrchestrator {
   }
 
   async createProject(basePath: string, projectName: string) {
-    const ok = createProjectFolder(basePath, projectName);
-    if (!ok) throw new Error(`Không thể tạo project: ${projectName}`);
+    if (!basePath || !fs.existsSync(basePath) || !fs.statSync(basePath).isDirectory()) {
+      throw new Error(`Thư mục gốc không hợp lệ: ${basePath}`);
+    }
 
-    const projectPath = path.join(basePath, projectName);
-    const project = addProject({
-      id: Date.now().toString(),
-      name: projectName,
+    const safeProjectName = sanitizeProjectName(projectName);
+    const projectPath = path.join(fs.realpathSync(basePath), safeProjectName);
+    const existingProjectDir = fs.existsSync(projectPath) && fs.statSync(projectPath).isDirectory();
+
+    if (!existingProjectDir) {
+      const ok = createProjectFolder(basePath, safeProjectName);
+      if (!ok) throw new Error(`Không thể tạo project: ${safeProjectName}`);
+    }
+
+    const metadataPath = path.join(projectPath, "project.json");
+    let projectId = Date.now().toString();
+    try {
+      if (fs.existsSync(metadataPath)) {
+        const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf-8"));
+        if (metadata?.id) projectId = String(metadata.id);
+      }
+    } catch {
+      // Use a fresh id if legacy metadata is unreadable.
+    }
+
+    const project = upsertProject({
+      id: projectId,
+      name: safeProjectName,
       path: projectPath,
       pinned: false,
     });
     if (!project) throw new Error("Không thể lưu project vào database");
+    syncProjectArtifactMetadata(projectPath, safeProjectName);
     return { projectPath, project };
   }
 
-  async downloadProjectVideo(videoUrl: string, projectPath: string, formatId?: string, onProgress?: ProgressCallback) {
-    const ok = await downloadVideo(videoUrl, projectPath, (progress) => {
+  async downloadProjectVideo(videoUrl: string, projectPath: string, formatId?: string, onProgress?: ProgressCallback, signal?: AbortSignal) {
+    const result = await downloadVideo(videoUrl, projectPath, (progress) => {
       const percent = Math.round((progress.video + progress.audio) / 2);
       onProgress?.("download_video", percent, `video ${progress.video}% audio ${progress.audio}%`);
-    }, formatId);
-    if (!ok) throw new Error("Tải video thất bại");
+    }, { formatId, signal });
+    if (!result.success) {
+      if (result.cancelled) throw new Error("Tải video đã bị hủy");
+      throw new Error(result.error || "Tải video thất bại");
+    }
     return true;
   }
 
@@ -164,42 +191,14 @@ export class PipelineOrchestrator {
     const apiKey = getApiKey("deepseek");
     if (!apiKey) throw new Error("Thiếu DeepSeek API key trong config");
 
-    const langName = TARGET_LANGUAGES.find((lang) => lang.code === targetLang)?.name || targetLang;
-    const prompts = getPrompts();
-    const activePromptId = getActivePromptId();
-    const promptConfig = prompts.find((prompt) => prompt.id === activePromptId) || prompts[0];
-    const systemPrompt = `Translate subtitle segments to ${langName}.
-
-FORMAT RULES:
-- Each segment is separated by "---"
-- Return ONLY the translated segments separated by "---", nothing else
-- Preserve the same number of segments
-- Do NOT add any extra text, explanation, or numbering
-
-${promptConfig?.systemPrompt || ""}`.trim();
-
     const batchSize = 20;
     const translated = new Map<number, string>();
     for (let i = 0; i < entries.length; i += batchSize) {
       const batch = entries.slice(i, i + batchSize);
-      const body = JSON.stringify({
-        model: "deepseek-chat",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: batch.map((entry) => entry.text).join("\n---\n") },
-        ],
-        temperature: 0.3,
+      const parts = await translateSegments({
+        targetLang,
+        texts: batch.map((entry) => entry.text),
       });
-
-      const response = await fetch("https://api.deepseek.com/chat/completions", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${apiKey}` },
-        body,
-      });
-      if (!response.ok) throw new Error(await response.text());
-
-      const data = await response.json() as { choices?: { message?: { content?: string } }[] };
-      const parts = (data.choices?.[0]?.message?.content || "").split(/\n?---\n?/);
       batch.forEach((entry, index) => translated.set(entry.index, parts[index]?.trim() || entry.text));
       onProgress?.("translate", Math.round(Math.min(entries.length, i + batch.length) / entries.length * 100), `Đã dịch ${Math.min(entries.length, i + batch.length)}/${entries.length}`);
     }
@@ -248,6 +247,7 @@ ${promptConfig?.systemPrompt || ""}`.trim();
     const runId = makeRunId();
     const artifacts: Record<string, string> = {};
     let projectPath: string | undefined;
+    let sourceVideoInfo: Record<string, unknown> | undefined;
 
     try {
       onProgress?.("create_project", 0, "Đang tạo project");
@@ -255,6 +255,12 @@ ${promptConfig?.systemPrompt || ""}`.trim();
       projectPath = created.projectPath;
       fs.writeFileSync(path.join(projectPath, "url.txt"), options.videoUrl, "utf-8");
       artifacts.projectPath = projectPath;
+      try {
+        sourceVideoInfo = await getVideoInfo(options.videoUrl) as unknown as Record<string, unknown>;
+      } catch (error) {
+        console.warn("[Pipeline] Failed to load video info for metadata:", error);
+      }
+      syncProjectArtifactMetadata(projectPath, options.projectName, options.videoUrl, sourceVideoInfo);
       onProgress?.("create_project", 100, "Đã tạo project");
     } catch (error) {
       return fail(runId, "create_project", error, projectPath, artifacts);
@@ -263,6 +269,7 @@ ${promptConfig?.systemPrompt || ""}`.trim();
     try {
       await this.downloadProjectVideo(options.videoUrl, projectPath, options.formatId, onProgress);
       artifacts.original = path.join(projectPath, "original");
+      syncProjectArtifactMetadata(projectPath, options.projectName, options.videoUrl, sourceVideoInfo);
     } catch (error) {
       return fail(runId, "download_video", error, projectPath, artifacts);
     }
@@ -270,18 +277,21 @@ ${promptConfig?.systemPrompt || ""}`.trim();
     try {
       const transcript = await this.transcribeProject(projectPath, options.whisperEngine, options.sourceLang || "auto", onProgress);
       artifacts.transcript = transcript.srtPath;
+      syncProjectArtifactMetadata(projectPath, options.projectName, options.videoUrl, sourceVideoInfo);
     } catch (error) {
       return fail(runId, "transcribe", error, projectPath, artifacts);
     }
 
     try {
       artifacts.translation = await this.translateProject(projectPath, options.targetLang, onProgress);
+      syncProjectArtifactMetadata(projectPath, options.projectName, options.videoUrl, sourceVideoInfo);
     } catch (error) {
       return fail(runId, "translate", error, projectPath, artifacts);
     }
 
     try {
       artifacts.audio = await this.generateProjectAudio(projectPath, options.targetLang, options.voiceId, onProgress);
+      syncProjectArtifactMetadata(projectPath, options.projectName, options.videoUrl, sourceVideoInfo);
     } catch (error) {
       return fail(runId, "generate_audio", error, projectPath, artifacts);
     }
@@ -289,6 +299,7 @@ ${promptConfig?.systemPrompt || ""}`.trim();
     try {
       const finalVideoPath = await this.createProjectFinalVideo(projectPath, options.targetLang, options.backgroundVolume, onProgress);
       artifacts.finalVideo = finalVideoPath;
+      syncProjectArtifactMetadata(projectPath, options.projectName, options.videoUrl, sourceVideoInfo);
       return { success: true, runId, projectPath, finalVideoPath, artifacts };
     } catch (error) {
       return fail(runId, "create_final_video", error, projectPath, artifacts);
@@ -302,12 +313,13 @@ ${promptConfig?.systemPrompt || ""}`.trim();
     }
 
     const runId = makeRunId();
-    const projectPath = path.join(options.basePath, options.projectName);
+    const projectPath = path.join(fs.realpathSync(options.basePath), sanitizeProjectName(options.projectName));
 
     const status = this.buildInitialStatus(runId, options, "");
     this.activeRunId = runId;
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
+    let sourceVideoInfo: Record<string, unknown> | undefined;
 
     (async () => {
       try {
@@ -341,14 +353,21 @@ ${promptConfig?.systemPrompt || ""}`.trim();
               status.projectPath = pp;
               status.stepProgress = 100;
               status.completedSteps.push(step);
+              try {
+                sourceVideoInfo = await getVideoInfo(options.videoUrl) as unknown as Record<string, unknown>;
+              } catch (error) {
+                console.warn("[Pipeline] Failed to load video info for metadata:", error);
+              }
+              syncProjectArtifactMetadata(projectPath, options.projectName, options.videoUrl, sourceVideoInfo);
               this.writeStatus(projectPath, status);
               break;
             }
             case "download_video": {
-              await this.downloadProjectVideo(options.videoUrl, projectPath, options.formatId, onProgress);
+              await this.downloadProjectVideo(options.videoUrl, projectPath, options.formatId, onProgress, signal);
               status.artifacts.original = path.join(projectPath, "original");
               status.stepProgress = 100;
               status.completedSteps.push(step);
+              syncProjectArtifactMetadata(projectPath, options.projectName, options.videoUrl, sourceVideoInfo);
               this.writeStatus(projectPath, status);
               break;
             }
@@ -357,6 +376,7 @@ ${promptConfig?.systemPrompt || ""}`.trim();
               status.artifacts.transcript = transcript.srtPath;
               status.stepProgress = 100;
               status.completedSteps.push(step);
+              syncProjectArtifactMetadata(projectPath, options.projectName, options.videoUrl, sourceVideoInfo);
               this.writeStatus(projectPath, status);
               break;
             }
@@ -365,6 +385,7 @@ ${promptConfig?.systemPrompt || ""}`.trim();
               status.artifacts.translation = translationPath;
               status.stepProgress = 100;
               status.completedSteps.push(step);
+              syncProjectArtifactMetadata(projectPath, options.projectName, options.videoUrl, sourceVideoInfo);
               this.writeStatus(projectPath, status);
               break;
             }
@@ -373,6 +394,7 @@ ${promptConfig?.systemPrompt || ""}`.trim();
               status.artifacts.audio = audioDir;
               status.stepProgress = 100;
               status.completedSteps.push(step);
+              syncProjectArtifactMetadata(projectPath, options.projectName, options.videoUrl, sourceVideoInfo);
               this.writeStatus(projectPath, status);
               break;
             }
@@ -382,6 +404,7 @@ ${promptConfig?.systemPrompt || ""}`.trim();
               status.finalVideoPath = finalVideoPath;
               status.stepProgress = 100;
               status.completedSteps.push(step);
+              syncProjectArtifactMetadata(projectPath, options.projectName, options.videoUrl, sourceVideoInfo);
               this.writeStatus(projectPath, status);
               break;
             }

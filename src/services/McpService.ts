@@ -19,6 +19,7 @@ import { getHardwareInfo } from './HardwareService';
 import { optimizeSrtFile } from '../lib/SrtOptimizer';
 import { createFinalVideo } from './FinalVideoService';
 import { pipelineOrchestrator } from './PipelineOrchestrator';
+import { assertProjectRoot, assertSrtFile, assertWritablePathInRegisteredProject } from './PathSecurity';
 
 export class McpService {
   private server: Server;
@@ -29,7 +30,15 @@ export class McpService {
 
   constructor() {
     this.app = express();
-    this.app.use(cors());
+    this.app.use(cors({
+      origin: (origin, callback) => {
+        if (!origin || /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(origin)) {
+          callback(null, true);
+          return;
+        }
+        callback(new Error('Origin not allowed'));
+      },
+    }));
 
     this.server = new Server(
       {
@@ -277,8 +286,9 @@ export class McpService {
 
           case 'transcribe_audio': {
             const { projectPath, engine, language } = args as any;
+            const safeProjectPath = assertProjectRoot(projectPath);
             const result = await transcribeAudio(
-              projectPath,
+              safeProjectPath,
               (progress) => { console.log(`[MCP Transcribe] ${progress.status}: ${progress.progress}%`); },
               engine || 'whisper-cpu',
               language || 'auto'
@@ -291,9 +301,10 @@ export class McpService {
 
           case 'generate_voice': {
             const { text, voiceName, outputPath } = args as any;
-            const success = await generateAudioSegment(text, voiceName, outputPath);
+            const safeOutputPath = assertWritablePathInRegisteredProject(outputPath);
+            const success = await generateAudioSegment(text, voiceName, safeOutputPath);
             return {
-              content: [{ type: 'text', text: success ? 'Tạo âm thanh thành công: ' + outputPath : 'Lỗi khi tạo âm thanh.' }],
+              content: [{ type: 'text', text: success ? 'Tạo âm thanh thành công: ' + safeOutputPath : 'Lỗi khi tạo âm thanh.' }],
               isError: !success,
             };
           }
@@ -334,7 +345,7 @@ export class McpService {
 
           case 'optimize_srt': {
             const { srtPath } = args as any;
-            const resultContent = optimizeSrtFile(srtPath);
+            const resultContent = optimizeSrtFile(assertSrtFile(srtPath));
             return {
               content: [{ type: 'text', text: 'Tối ưu srt thành công!\nPreview:\n' + resultContent.substring(0, 500) }],
             };
@@ -342,7 +353,8 @@ export class McpService {
 
           case 'merge_audio_video': {
             const { projectPath } = args as any;
-            const resultPath = await createFinalVideo(projectPath, (progress) => {
+            const safeProjectPath = assertProjectRoot(projectPath);
+            const resultPath = await createFinalVideo(safeProjectPath, (progress) => {
                 console.log(`[MCP Merge Video] ${progress.status}: ${progress.progress}% - ${progress.detail}`);
             });
             if (!resultPath) throw new Error('Quá trình merge video gặp lỗi.');
@@ -359,15 +371,17 @@ export class McpService {
 
           case 'download_video_to_project': {
             const { videoUrl, projectPath, formatId } = args as any;
-            await pipelineOrchestrator.downloadProjectVideo(videoUrl, projectPath, formatId, (step, progress, detail) => {
+            const safeProjectPath = assertProjectRoot(projectPath);
+            await pipelineOrchestrator.downloadProjectVideo(videoUrl, safeProjectPath, formatId, (step, progress, detail) => {
               console.log(`[MCP Pipeline] ${step}: ${progress}% - ${detail}`);
             });
-            return { content: [{ type: 'text', text: JSON.stringify({ success: true, projectPath }, null, 2) }] };
+            return { content: [{ type: 'text', text: JSON.stringify({ success: true, projectPath: safeProjectPath }, null, 2) }] };
           }
 
           case 'transcribe_project': {
             const { projectPath, engine, language } = args as any;
-            const result = await pipelineOrchestrator.transcribeProject(projectPath, engine, language || 'auto', (step, progress, detail) => {
+            const safeProjectPath = assertProjectRoot(projectPath);
+            const result = await pipelineOrchestrator.transcribeProject(safeProjectPath, engine, language || 'auto', (step, progress, detail) => {
               console.log(`[MCP Pipeline] ${step}: ${progress}% - ${detail}`);
             });
             return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
@@ -375,7 +389,8 @@ export class McpService {
 
           case 'translate_project_srt': {
             const { projectPath, targetLang } = args as any;
-            const srtPath = await pipelineOrchestrator.translateProject(projectPath, targetLang, (step, progress, detail) => {
+            const safeProjectPath = assertProjectRoot(projectPath);
+            const srtPath = await pipelineOrchestrator.translateProject(safeProjectPath, targetLang, (step, progress, detail) => {
               console.log(`[MCP Pipeline] ${step}: ${progress}% - ${detail}`);
             });
             return { content: [{ type: 'text', text: JSON.stringify({ success: true, srtPath }, null, 2) }] };
@@ -383,7 +398,8 @@ export class McpService {
 
           case 'generate_project_audio': {
             const { projectPath, targetLang, voiceId } = args as any;
-            const audioDir = await pipelineOrchestrator.generateProjectAudio(projectPath, targetLang, voiceId, (step, progress, detail) => {
+            const safeProjectPath = assertProjectRoot(projectPath);
+            const audioDir = await pipelineOrchestrator.generateProjectAudio(safeProjectPath, targetLang, voiceId, (step, progress, detail) => {
               console.log(`[MCP Pipeline] ${step}: ${progress}% - ${detail}`);
             });
             return { content: [{ type: 'text', text: JSON.stringify({ success: true, audioDir }, null, 2) }] };
@@ -391,14 +407,19 @@ export class McpService {
 
           case 'create_project_final_video': {
             const { projectPath, targetLang, backgroundVolume } = args as any;
-            const finalVideoPath = await pipelineOrchestrator.createProjectFinalVideo(projectPath, targetLang, backgroundVolume, (step, progress, detail) => {
+            const safeProjectPath = assertProjectRoot(projectPath);
+            const finalVideoPath = await pipelineOrchestrator.createProjectFinalVideo(safeProjectPath, targetLang, backgroundVolume, (step, progress, detail) => {
               console.log(`[MCP Pipeline] ${step}: ${progress}% - ${detail}`);
             });
             return { content: [{ type: 'text', text: JSON.stringify({ success: true, finalVideoPath }, null, 2) }] };
           }
 
           case 'run_full_pipeline': {
-            const startResult = pipelineOrchestrator.startPipeline(args as any);
+            const pipelineArgs = args as any;
+            const startResult = pipelineOrchestrator.startPipeline({
+              ...pipelineArgs,
+              projectPath: pipelineArgs.projectPath ? assertProjectRoot(pipelineArgs.projectPath) : pipelineArgs.projectPath,
+            });
             if (!startResult.accepted) {
               return {
                 content: [{ type: 'text', text: JSON.stringify(startResult, null, 2) }],
@@ -412,7 +433,7 @@ export class McpService {
 
           case 'get_pipeline_status': {
             const { projectPath } = args as any;
-            const status = pipelineOrchestrator.readStatus(projectPath);
+            const status = pipelineOrchestrator.readStatus(assertProjectRoot(projectPath));
             if (!status) {
               return {
                 content: [{ type: 'text', text: JSON.stringify({ error: 'Không tìm thấy trạng thái pipeline cho project này.' }, null, 2) }],

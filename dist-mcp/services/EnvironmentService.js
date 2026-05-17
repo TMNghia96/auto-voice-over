@@ -10,11 +10,12 @@ const fs_1 = __importDefault(require("fs"));
 const https_1 = __importDefault(require("https"));
 const child_process_1 = require("child_process");
 const HardwareService_1 = require("./HardwareService");
+const AppPaths_1 = require("./AppPaths");
 const PathUtils_1 = require("../lib/PathUtils");
 const isDev = !electron_1.app.isPackaged;
 const BIN_DIR = isDev
     ? path_1.default.join(process.cwd(), 'bin')
-    : path_1.default.join(electron_1.app.getPath('userData'), 'bin');
+    : path_1.default.join((0, AppPaths_1.getAppUserDataPath)(), 'bin');
 const MODELS_DIR = path_1.default.join(BIN_DIR, 'models');
 const WHISPER_CPU_DIR = path_1.default.join(BIN_DIR, 'whisper-cpu');
 const WHISPER_GPU_DIR = path_1.default.join(BIN_DIR, 'whisper-gpu');

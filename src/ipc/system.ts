@@ -1,19 +1,32 @@
 import { ipcMain, shell } from "electron";
 import fs from "fs";
 import path from "path";
-import { getApiKey, setApiKey, getPrompts, savePrompts, getActivePromptId, setActivePromptId, getDefaultBackgroundVolume, setDefaultBackgroundVolume, getDefaultFadeDuration, setDefaultFadeDuration } from "../services/ConfigService";
+import { hasApiKey, setApiKey, getPrompts, savePrompts, getActivePromptId, setActivePromptId, getDefaultBackgroundVolume, setDefaultBackgroundVolume, getDefaultFadeDuration, setDefaultFadeDuration } from "../services/ConfigService";
+import { assertProjectRoot, assertVideoFile, findAllowedProjectRootForPath } from "../services/PathSecurity";
+import { translateSegments } from "../services/TranslationService";
+import { inspectProjectPhases } from "../services/ProjectArtifacts";
 
 export const setupSystemIpc = () => {
     ipcMain.handle("get-api-key", (_event, provider: string) => {
-        return getApiKey(provider);
+        console.warn(`[IPC] get-api-key is deprecated and no longer returns secrets for provider: ${provider}`);
+        return "";
+    });
+
+    ipcMain.handle("has-api-key", (_event, provider: string) => {
+        return hasApiKey(provider);
     });
 
     ipcMain.handle("set-api-key", (_event, provider: string, key: string) => {
         return setApiKey(provider, key);
     });
 
+    ipcMain.handle("translate-segments", async (_event, targetLang: string, texts: string[], promptId?: string) => {
+        return translateSegments({ targetLang, texts, promptId });
+    });
+
     ipcMain.handle("open-in-explorer", (_event, filePath: string) => {
         try {
+            if (!findAllowedProjectRootForPath(filePath)) return false;
             shell.showItemInFolder(filePath);
             return true;
         } catch {
@@ -23,6 +36,7 @@ export const setupSystemIpc = () => {
 
     ipcMain.handle("open-file", async (_event, filePath: string) => {
         try {
+            if (!findAllowedProjectRootForPath(filePath)) return false;
             await shell.openPath(filePath);
             return true;
         } catch {
@@ -32,9 +46,9 @@ export const setupSystemIpc = () => {
 
     ipcMain.handle("read-video-file", (_event, filePath: string) => {
         try {
-            if (!fs.existsSync(filePath)) return null;
-            const buffer = fs.readFileSync(filePath);
-            const ext = path.extname(filePath).toLowerCase();
+            const safeFilePath = assertVideoFile(filePath);
+            const buffer = fs.readFileSync(safeFilePath);
+            const ext = path.extname(safeFilePath).toLowerCase();
             const mime =
                 ext === ".mp4" ? "video/mp4"
                     : ext === ".mkv" ? "video/x-matroska"
@@ -50,20 +64,22 @@ export const setupSystemIpc = () => {
     ipcMain.handle("check-project-phases", (_event, projectPath: string) => {
         const empty = { download: false, transcript: false, translate: false, audio: false, final: false };
         try {
-            if (!projectPath || !fs.existsSync(projectPath)) return empty;
+            const safeProjectPath = assertProjectRoot(projectPath);
+            if (!safeProjectPath || !fs.existsSync(safeProjectPath)) return empty;
 
-            const configFile = path.join(projectPath, "project.json");
-            if (!fs.existsSync(configFile)) return empty;
+            const artifactStatus = inspectProjectPhases(safeProjectPath);
+            const configFile = path.join(safeProjectPath, "project.json");
+            if (!fs.existsSync(configFile)) return artifactStatus;
 
             const meta = JSON.parse(fs.readFileSync(configFile, "utf-8"));
             const completed: string[] = meta.completedPhases || [];
 
             return {
-                download: completed.includes("download"),
-                transcript: completed.includes("transcript"),
-                translate: completed.includes("translate"),
-                audio: completed.includes("audio"),
-                final: completed.includes("final"),
+                download: artifactStatus.download || completed.includes("download"),
+                transcript: artifactStatus.transcript || completed.includes("transcript"),
+                translate: artifactStatus.translate || completed.includes("translate"),
+                audio: artifactStatus.audio || completed.includes("audio"),
+                final: artifactStatus.final || completed.includes("final"),
             };
         } catch {
             return empty;

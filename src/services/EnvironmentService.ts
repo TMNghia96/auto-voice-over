@@ -4,12 +4,13 @@ import fs from 'fs';
 import https from 'https';
 import { spawn, spawnSync } from 'child_process';
 import { getHardwareInfo } from './HardwareService';
+import { getAppUserDataPath } from './AppPaths';
 import { getWindowsShortPath } from '../lib/PathUtils';
 
 const isDev = !app.isPackaged;
 const BIN_DIR = isDev
     ? path.join(process.cwd(), 'bin')
-    : path.join(app.getPath('userData'), 'bin');
+    : path.join(getAppUserDataPath(), 'bin');
 
 const MODELS_DIR = path.join(BIN_DIR, 'models');
 const WHISPER_CPU_DIR = path.join(BIN_DIR, 'whisper-cpu');

@@ -34,6 +34,17 @@ export const HomePage = () => {
 
     useEffect(() => {
         loadProjects();
+
+        const refreshOnVisible = () => {
+            if (document.visibilityState === "visible") loadProjects();
+        };
+        window.addEventListener("focus", loadProjects);
+        document.addEventListener("visibilitychange", refreshOnVisible);
+
+        return () => {
+            window.removeEventListener("focus", loadProjects);
+            document.removeEventListener("visibilitychange", refreshOnVisible);
+        };
     }, []);
 
     useEffect(() => {

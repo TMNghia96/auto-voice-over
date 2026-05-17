@@ -17,12 +17,41 @@ vi.mock(import('fs/promises'), async (importOriginal) => {
     ...(await importOriginal()),
     access: vi.fn(),
     copyFile: vi.fn(),
+    stat: vi.fn(),
     unlink: vi.fn(),
     writeFile: vi.fn(),
   };
 });
-vi.mock(import('child_process'), async (importOriginal) => ({
-  ...(await importOriginal()),
+const childProcessMock = vi.hoisted(() => ({
+  execFile: vi.fn((_file: string, _args: string[], optionsOrCallback: any, maybeCallback?: any) => {
+    const callback = typeof optionsOrCallback === 'function' ? optionsOrCallback : maybeCallback;
+    callback?.(null, '', '');
+    return { pid: 123 };
+  }),
+  spawn: vi.fn(() => ({
+    pid: 123,
+    stdout: {
+      on: (event: string, callback: Function) => {
+        if (event === 'data') callback(Buffer.from('5.000'));
+      },
+    },
+    stderr: { on: () => {} },
+    on: (event: string, callback: Function) => {
+      if (event === 'close') callback(0);
+    },
+  })),
+  exec: vi.fn(),
+}));
+
+vi.mock('child_process', () => ({
+  execFile: childProcessMock.execFile,
+  spawn: childProcessMock.spawn,
+  exec: childProcessMock.exec,
+  default: {
+    execFile: childProcessMock.execFile,
+    spawn: childProcessMock.spawn,
+    exec: childProcessMock.exec,
+  },
 }));
 vi.mock('../../../src/services/video/encoders/EncoderFactory');
 vi.mock('../../../src/services/video/SegmentValidator');
@@ -65,7 +94,10 @@ describe('VideoProcessor', () => {
     // Mock fs operations
     vi.mocked(fs.access).mockResolvedValue(undefined);
     vi.mocked(fs.copyFile).mockResolvedValue(undefined);
+    vi.mocked(fs.stat).mockResolvedValue({ size: 1024000 } as any);
     vi.mocked(fs.unlink).mockResolvedValue(undefined);
+    childProcessMock.execFile.mockClear();
+    childProcessMock.spawn.mockClear();
 
     // Default config
     config = {
@@ -394,7 +426,7 @@ describe('VideoProcessor', () => {
   });
 
   describe('processVideoChunks', () => {
-    it('should encode 1x-speed chunks instead of stream-copying them', async () => {
+    it('should stream-copy 1x-speed chunks when forceEncode is false', async () => {
       const onProgress = vi.fn();
       const chunks = [
         { videoStart: 0, videoEnd: 5, videoDuration: 5, adjustedVideoSpeed: 1.0 },
@@ -408,17 +440,53 @@ describe('VideoProcessor', () => {
       );
 
       expect(result).toEqual([path.join('/temp', 'chunk_0000.mp4')]);
+      expect(mockEncoder.encodeSegment).not.toHaveBeenCalled();
+      expect(childProcessMock.execFile).toHaveBeenCalled();
+      expect(onProgress).toHaveBeenCalledWith(1);
+    });
+
+    it('should encode changed-speed chunks', async () => {
+      const onProgress = vi.fn();
+      const chunks = [
+        { videoStart: 0, videoEnd: 5, videoDuration: 5, adjustedVideoSpeed: 0.8 },
+      ];
+
+      const result = await videoProcessor.processVideoChunks(
+        chunks,
+        '/video/original.mp4',
+        '/temp',
+        onProgress,
+        false
+      );
+
+      expect(result).toEqual([path.join('/temp', 'chunk_0000.mp4')]);
       expect(mockEncoder.encodeSegment).toHaveBeenCalledWith(
         '/video/original.mp4',
         path.join('/temp', 'chunk_0000.mp4'),
         expect.objectContaining({
           startTime: 0,
           duration: 5,
-          videoSpeed: 1.0,
+          videoSpeed: 0.8,
           fps: 30,
         })
       );
-      expect(onProgress).toHaveBeenCalledWith(1);
+    });
+
+    it('should encode all chunks when forceEncode is true', async () => {
+      const onProgress = vi.fn();
+      const chunks = [
+        { videoStart: 0, videoEnd: 5, videoDuration: 5, adjustedVideoSpeed: 1.0 },
+      ];
+
+      await videoProcessor.processVideoChunks(
+        chunks,
+        '/video/original.mp4',
+        '/temp',
+        onProgress,
+        true
+      );
+
+      expect(mockEncoder.encodeSegment).toHaveBeenCalledTimes(1);
     });
   });
 

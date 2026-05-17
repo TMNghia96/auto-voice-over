@@ -65,6 +65,10 @@ export class VoicePreviewService {
     const selected = VoicePreviewService.selectRandomEntries(entries, sampleCount);
     const samples: PreviewSample[] = [];
 
+    if (!fs.existsSync(previewsDir)) {
+      fs.mkdirSync(previewsDir, { recursive: true });
+    }
+
     for (const entry of selected) {
       const fileName = `preview_${entry.index}.mp3`;
       const audioPath = path.join(previewsDir, fileName);
@@ -82,9 +86,6 @@ export class VoicePreviewService {
       cachedAt: Date.now(),
     };
 
-    if (!fs.existsSync(previewsDir)) {
-      fs.mkdirSync(previewsDir, { recursive: true });
-    }
     fs.writeFileSync(cachePath, JSON.stringify(cacheEntry, null, 2));
 
     return { voiceId, samples };

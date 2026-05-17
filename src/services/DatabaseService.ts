@@ -1,6 +1,6 @@
 import Database from 'better-sqlite3';
-import { app } from 'electron';
 import path from 'path';
+import { getAppUserDataPath } from './AppPaths';
 
 let db: Database.Database | null = null;
 
@@ -19,7 +19,7 @@ interface ProjectRow extends Omit<Project, 'pinned'> {
 export const connectDB = () => {
     if (db) return db;
 
-    const dbPath = path.join(app.getPath('userData'), 'projects.db');
+    const dbPath = path.join(getAppUserDataPath(), 'projects.db');
 
     try {
         db = new Database(dbPath, {
@@ -59,6 +59,34 @@ export const addProject = (project: Omit<Project, 'createdAt'>): Project | null 
         return db.prepare('SELECT * FROM projects WHERE id = ?').get(project.id) as Project;
     } catch (error) {
         console.error('Error adding project:', error);
+        return null;
+    }
+};
+
+export const upsertProject = (project: Omit<Project, 'createdAt'>): Project | null => {
+    if (!db) connectDB();
+    try {
+        const existingByPath = db.prepare('SELECT * FROM projects WHERE path = ?').get(project.path) as ProjectRow | undefined;
+        if (existingByPath) {
+            db.prepare('UPDATE projects SET name = ?, pinned = ? WHERE id = ?')
+                .run(project.name, project.pinned ? 1 : 0, existingByPath.id);
+            const updated = db.prepare('SELECT * FROM projects WHERE id = ?').get(existingByPath.id) as ProjectRow;
+            return { ...updated, pinned: !!updated.pinned };
+        }
+
+        db.prepare(`
+            INSERT INTO projects (id, name, path, pinned)
+            VALUES (@id, @name, @path, @pinned)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                path = excluded.path,
+                pinned = excluded.pinned
+        `).run({ ...project, pinned: project.pinned ? 1 : 0 });
+
+        const saved = db.prepare('SELECT * FROM projects WHERE id = ?').get(project.id) as ProjectRow;
+        return { ...saved, pinned: !!saved.pinned };
+    } catch (error) {
+        console.error('Error upserting project:', error);
         return null;
     }
 };

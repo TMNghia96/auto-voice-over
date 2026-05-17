@@ -1,13 +1,17 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { VoiceSelector } from '../VoiceSelector';
+import { getPresetsForLanguage } from '@/services/tts/VoiceCatalog';
 
 describe('VoiceSelector', () => {
+  const viVoices = getPresetsForLanguage('vi');
+
   it('should render voice dropdown with selected preset', () => {
     const onVoiceChange = vi.fn();
     render(
       <VoiceSelector
         language="vi"
+        voices={viVoices}
         selectedVoiceId="vi-VN-NamMinhNeural"
         onVoiceChange={onVoiceChange}
       />
@@ -20,6 +24,7 @@ describe('VoiceSelector', () => {
     render(
       <VoiceSelector
         language="vi"
+        voices={viVoices}
         selectedVoiceId="vi-VN-NamMinhNeural"
         onVoiceChange={onVoiceChange}
       />
@@ -33,6 +38,7 @@ describe('VoiceSelector', () => {
     render(
       <VoiceSelector
         language="vi"
+        voices={viVoices}
         selectedVoiceId="vi-VN-NamMinhNeural"
         onVoiceChange={vi.fn()}
         onPreview={onPreview}
@@ -46,6 +52,7 @@ describe('VoiceSelector', () => {
     render(
       <VoiceSelector
         language="vi"
+        voices={viVoices}
         selectedVoiceId="vi-VN-NamMinhNeural"
         onVoiceChange={vi.fn()}
       />

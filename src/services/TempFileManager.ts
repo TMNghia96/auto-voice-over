@@ -96,6 +96,26 @@ class TempFileManager {
         this.tempDirs.clear();
         this.isCleaningUp = false;
     }
+
+    async cleanupDirectory(dir: string): Promise<void> {
+        try {
+            if (process.platform === 'win32') {
+                await this.unlockDirectory(dir);
+            }
+
+            await fs.promises.rm(dir, {
+                recursive: true,
+                force: true,
+                maxRetries: 5,
+                retryDelay: 1000
+            });
+
+            this.unregister(dir);
+            console.log(`[TempManager] Cleaned: ${dir}`);
+        } catch (e) {
+            console.error(`[TempManager] Failed to clean ${dir}:`, e);
+        }
+    }
     
     private async unlockDirectory(dir: string): Promise<void> {
         return new Promise((resolve) => {

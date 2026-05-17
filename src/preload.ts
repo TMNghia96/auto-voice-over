@@ -13,8 +13,9 @@ contextBridge.exposeInMainWorld('api', {
     getPinnedPath: () => ipcRenderer.invoke('get-pinned-path'),
     setPinnedPath: (path: string) => ipcRenderer.invoke('set-pinned-path', path),
 
-    getApiKey: (provider: string) => ipcRenderer.invoke('get-api-key', provider),
+    hasApiKey: (provider: string) => ipcRenderer.invoke('has-api-key', provider),
     setApiKey: (provider: string, key: string) => ipcRenderer.invoke('set-api-key', provider, key),
+    translateSegments: (targetLang: string, texts: string[], promptId?: string) => ipcRenderer.invoke('translate-segments', targetLang, texts, promptId),
     getPrompts: () => ipcRenderer.invoke('get-prompts'),
     savePrompts: (prompts: any[]) => ipcRenderer.invoke('save-prompts', prompts),
     getActivePromptId: () => ipcRenderer.invoke('get-active-prompt-id'),

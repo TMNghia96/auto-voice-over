@@ -3,14 +3,16 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.setDefaultFadeDuration = exports.getDefaultFadeDuration = exports.setDefaultBackgroundVolume = exports.getDefaultBackgroundVolume = exports.setActivePromptId = exports.getActivePromptId = exports.savePrompts = exports.getPrompts = exports.saveProjectMetadata = exports.getProjectMetadata = exports.deleteProjectFolder = exports.createProjectFolder = exports.setApiKey = exports.getApiKey = exports.setPinnedPath = exports.getPinnedPath = void 0;
+exports.setDefaultFadeDuration = exports.getDefaultFadeDuration = exports.setDefaultBackgroundVolume = exports.getDefaultBackgroundVolume = exports.setActivePromptId = exports.getActivePromptId = exports.savePrompts = exports.getPrompts = exports.saveProjectMetadata = exports.getProjectMetadata = exports.deleteProjectFolder = exports.createProjectFolder = exports.setApiKey = exports.hasApiKey = exports.getApiKey = exports.setPinnedPath = exports.getPinnedPath = void 0;
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const electron_1 = require("electron");
+const AppPaths_1 = require("./AppPaths");
+const PathSecurity_1 = require("./PathSecurity");
 const isDev = process.env.NODE_ENV === 'development' || !electron_1.app.isPackaged;
 const CONFIG_PATH = isDev
     ? path_1.default.join(process.cwd(), 'src/config/config.json')
-    : path_1.default.join(electron_1.app.getPath('userData'), 'config.json');
+    : path_1.default.join((0, AppPaths_1.getAppUserDataPath)(), 'config.json');
 const readConfig = () => {
     try {
         if (fs_1.default.existsSync(CONFIG_PATH)) {
@@ -52,6 +54,10 @@ const getApiKey = (provider) => {
     return config.apiKeys?.[provider] || "";
 };
 exports.getApiKey = getApiKey;
+const hasApiKey = (provider) => {
+    return (0, exports.getApiKey)(provider).trim().length > 0;
+};
+exports.hasApiKey = hasApiKey;
 const setApiKey = (provider, key) => {
     const config = readConfig();
     const apiKeys = { ...(config.apiKeys || {}), [provider]: key };
@@ -60,14 +66,18 @@ const setApiKey = (provider, key) => {
 exports.setApiKey = setApiKey;
 const createProjectFolder = (basePath, projectName) => {
     try {
-        const targetDir = path_1.default.join(basePath, projectName);
+        if (!basePath || !fs_1.default.existsSync(basePath) || !fs_1.default.statSync(basePath).isDirectory()) {
+            return false;
+        }
+        const safeProjectName = (0, PathSecurity_1.sanitizeProjectName)(projectName);
+        const targetDir = path_1.default.join(fs_1.default.realpathSync(basePath), safeProjectName);
         if (fs_1.default.existsSync(targetDir)) {
             return false;
         }
         fs_1.default.mkdirSync(targetDir, { recursive: true });
         const metadata = {
             id: Date.now().toString(), // Simple ID, or passed from DB?
-            name: projectName,
+            name: safeProjectName,
             createdAt: new Date().toISOString(),
             status: 'created'
         };
@@ -83,8 +93,9 @@ const createProjectFolder = (basePath, projectName) => {
 exports.createProjectFolder = createProjectFolder;
 const deleteProjectFolder = (projectPath) => {
     try {
-        if (fs_1.default.existsSync(projectPath)) {
-            fs_1.default.rmSync(projectPath, { recursive: true, force: true });
+        const safeProjectPath = (0, PathSecurity_1.assertProjectRoot)(projectPath);
+        if (fs_1.default.existsSync(safeProjectPath)) {
+            fs_1.default.rmSync(safeProjectPath, { recursive: true, force: true });
         }
         return true;
     }
@@ -96,7 +107,8 @@ const deleteProjectFolder = (projectPath) => {
 exports.deleteProjectFolder = deleteProjectFolder;
 const getProjectMetadata = (projectPath) => {
     try {
-        const configFile = path_1.default.join(projectPath, 'project.json');
+        const safeProjectPath = (0, PathSecurity_1.assertProjectRoot)(projectPath);
+        const configFile = path_1.default.join(safeProjectPath, 'project.json');
         if (fs_1.default.existsSync(configFile)) {
             const data = fs_1.default.readFileSync(configFile, 'utf-8');
             return JSON.parse(data);
@@ -110,7 +122,8 @@ const getProjectMetadata = (projectPath) => {
 exports.getProjectMetadata = getProjectMetadata;
 const saveProjectMetadata = (projectPath, metadata) => {
     try {
-        const configFile = path_1.default.join(projectPath, 'project.json');
+        const safeProjectPath = (0, PathSecurity_1.assertProjectRoot)(projectPath);
+        const configFile = path_1.default.join(safeProjectPath, 'project.json');
         let existing = {};
         if (fs_1.default.existsSync(configFile)) {
             try {

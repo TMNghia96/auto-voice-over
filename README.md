@@ -41,6 +41,8 @@ Hệ thống được chia sẻ thành các module độc lập, với Flow xử
 5. **Final Video Phase:** Ghép nối các file âm thanh với video gốc. Xử lý khoảng trống (gap), **trộn âm thanh nền (Ducking)**, re-encode đồng bộ thông qua GPU NVENC, đảm bảo không có khung hình chết (frozen frames).
 6. **AI Agent Integration (MCP):** Cung cấp giao diện **Model Context Protocol** để các trợ lý AI có thể tương tác trực tiếp với dự án.
 
+> 📖 **[Xem hướng dẫn chi tiết kết nối MCP với AI Tools →](./MCP_INTEGRATION.md)**
+
 ---
 
 ## 3. Quản lý Tệp thực thi (Bin)
@@ -112,9 +114,3 @@ npm run make
    - Run sinh giọng đọc AI (Hệ thống cung cấp hơn 10 Voice Name của từng quốc gia khác nhau).
    - Cuối cùng, run mục "Tạo video Final" - vui lòng đợi quá trình NVENC và HandBrake tái lập khung hình. 
 4. Truy xuất video đã lồng tiếng thành công tại thư mục `[Tên Project]/final/final_video_synced.mp4`.
-
----
-
-<div align="center">
-  <sub>Mã nguồn và ứng dụng được phát triển bởi leemjnnkdzuy (duylelv17@gmail.com).</sub>
-</div>

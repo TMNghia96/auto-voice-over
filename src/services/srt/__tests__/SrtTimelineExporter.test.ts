@@ -25,6 +25,8 @@ describe('SrtTimelineExporter', () => {
         audioDuration: 2.4,
         targetDuration: 5.133,
         adjustedVideoSpeed: 1.0,
+        adjustedDuration: 5.133,
+        needsSlowMotion: false,
         audioSpeed: 1.0,
         videoSpeed: 1.0,
       },

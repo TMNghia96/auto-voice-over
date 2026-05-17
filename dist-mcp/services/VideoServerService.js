@@ -40,6 +40,7 @@ exports.startVideoServer = exports.closeStreamsForPath = void 0;
 const http = __importStar(require("http"));
 const url = __importStar(require("url"));
 const fs_1 = __importDefault(require("fs"));
+const PathSecurity_1 = require("./PathSecurity");
 const activeStreams = new Set();
 /**
  * Close all active streams whose file path starts with the given prefix.
@@ -64,6 +65,19 @@ const closeStreamsForPath = (pathPrefix) => {
 exports.closeStreamsForPath = closeStreamsForPath;
 const startVideoServer = () => {
     return new Promise((resolve) => {
+        const videoHeaders = (req, extra = {}) => {
+            const origin = req.headers.origin;
+            const headers = {
+                "Accept-Ranges": "bytes",
+                "Content-Type": "video/mp4",
+                ...extra,
+            };
+            if (typeof origin === "string" && /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(origin)) {
+                headers["Access-Control-Allow-Origin"] = origin;
+                headers["Vary"] = "Origin";
+            }
+            return headers;
+        };
         const server = http.createServer((req, res) => {
             if (!req.url) {
                 res.writeHead(404);
@@ -72,14 +86,23 @@ const startVideoServer = () => {
             }
             const parsedUrl = url.parse(req.url, true);
             if (parsedUrl.pathname === "/video") {
-                const filePath = parsedUrl.query.path;
-                if (!filePath) {
+                const requestedPath = parsedUrl.query.path;
+                if (!requestedPath) {
                     res.writeHead(400);
                     res.end("Missing path parameter");
                     return;
                 }
-                if (!fs_1.default.existsSync(filePath)) {
-                    console.error(`Video file not found: ${filePath}`);
+                let filePath;
+                try {
+                    filePath = (0, PathSecurity_1.assertVideoFile)(requestedPath);
+                }
+                catch (error) {
+                    if (error instanceof PathSecurity_1.PathSecurityError) {
+                        res.writeHead(403);
+                        res.end("Forbidden");
+                        return;
+                    }
+                    console.error(`Video file not found: ${requestedPath}`);
                     res.writeHead(404);
                     res.end("File not found");
                     return;
@@ -105,22 +128,16 @@ const startVideoServer = () => {
                             return;
                         }
                         const chunksize = end - start + 1;
-                        res.writeHead(206, {
+                        res.writeHead(206, videoHeaders(req, {
                             "Content-Range": `bytes ${start}-${end}/${fileSize}`,
-                            "Accept-Ranges": "bytes",
                             "Content-Length": chunksize,
-                            "Content-Type": "video/mp4",
-                            "Access-Control-Allow-Origin": "*",
-                        });
+                        }));
                         readStream = fs_1.default.createReadStream(filePath, { start, end });
                     }
                     else {
-                        res.writeHead(200, {
+                        res.writeHead(200, videoHeaders(req, {
                             "Content-Length": fileSize,
-                            "Accept-Ranges": "bytes",
-                            "Content-Type": "video/mp4",
-                            "Access-Control-Allow-Origin": "*",
-                        });
+                        }));
                         readStream = fs_1.default.createReadStream(filePath);
                     }
                     const entry = { filePath, stream: readStream };

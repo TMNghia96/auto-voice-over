@@ -16,6 +16,7 @@ import {
     saveProjectMetadata,
 } from "../services/ConfigService";
 import { closeStreamsForPath } from "../services/VideoServerService";
+import { assertProjectRoot } from "../services/PathSecurity";
 
 export const setupProjectIpc = () => {
     ipcMain.handle("get-projects", () => {
@@ -61,24 +62,25 @@ export const setupProjectIpc = () => {
     });
 
     ipcMain.handle("get-project-metadata", (_event, projectPath) => {
-        return getProjectMetadata(projectPath);
+        return getProjectMetadata(assertProjectRoot(projectPath));
     });
 
     ipcMain.handle("save-project-metadata", (_event, projectPath, metadata) => {
-        return saveProjectMetadata(projectPath, metadata);
+        return saveProjectMetadata(assertProjectRoot(projectPath), metadata);
     });
 
     ipcMain.handle("reset-project-data", (_event, projectPath: string) => {
+        const safeProjectPath = assertProjectRoot(projectPath);
         const foldersToDelete = ["original", "transcript", "translate", "audio_gene", "final"];
 
         for (const folder of foldersToDelete) {
-            const fullPath = path.join(projectPath, folder);
+            const fullPath = path.join(safeProjectPath, folder);
             if (fs.existsSync(fullPath)) {
                 fs.rmSync(fullPath, { recursive: true, force: true });
             }
         }
 
-        const configFile = path.join(projectPath, "project.json");
+        const configFile = path.join(safeProjectPath, "project.json");
         if (fs.existsSync(configFile)) {
             try {
                 const meta = JSON.parse(fs.readFileSync(configFile, "utf-8"));

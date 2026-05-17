@@ -4,6 +4,8 @@ const electron_1 = require("electron");
 const DatabaseService_1 = require("./services/DatabaseService");
 const VideoServerService_1 = require("./services/VideoServerService");
 const McpService_1 = require("./services/McpService");
+const AppPaths_1 = require("./services/AppPaths");
+(0, AppPaths_1.configureAppIdentity)();
 const run = async () => {
     console.log("[MCP Main] Booting standalone MCP process...");
     try {

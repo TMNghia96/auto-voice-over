@@ -7,6 +7,7 @@ import {
 import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
+import { assertProjectRoot, isAllowedLocalVideoSource } from "../services/PathSecurity";
 
 export const setupVideoIpc = () => {
 	ipcMain.handle("get-video-info", (_event, url) => {
@@ -18,10 +19,18 @@ export const setupVideoIpc = () => {
 	});
 
 	ipcMain.on("download-video", (event, url, projectPath, formatId?: string) => {
-		downloadVideo(url, projectPath, (progress) => {
+		let safeProjectPath: string;
+		try {
+			safeProjectPath = assertProjectRoot(projectPath);
+		} catch {
+			event.sender.send("download-complete", false);
+			return;
+		}
+		downloadVideo(url, safeProjectPath, (progress) => {
 			event.sender.send("download-progress", progress);
-		}, formatId).then((success) => {
-			event.sender.send("download-complete", success);
+		}, { formatId }).then((result) => {
+			if (!result.success && result.error) console.error("Download failed:", result.error);
+			event.sender.send("download-complete", result.success);
 		});
 	});
 
@@ -49,16 +58,29 @@ export const setupVideoIpc = () => {
 	ipcMain.on(
 		"import-local-video",
 		(event, filePath: string, projectPath: string) => {
-			const videoDir = path.join(projectPath, "original", "video");
-			const audioDir = path.join(projectPath, "original", "audio");
+			let safeProjectPath: string;
+			if (!isAllowedLocalVideoSource(filePath)) {
+				event.sender.send("import-local-complete", false);
+				return;
+			}
+			try {
+				safeProjectPath = assertProjectRoot(projectPath);
+			} catch {
+				event.sender.send("import-local-complete", false);
+				return;
+			}
+
+			const sourceVideo = fs.realpathSync(filePath);
+			const videoDir = path.join(safeProjectPath, "original", "video");
+			const audioDir = path.join(safeProjectPath, "original", "audio");
 
 			if (!fs.existsSync(videoDir))
 				fs.mkdirSync(videoDir, {recursive: true});
 			if (!fs.existsSync(audioDir))
 				fs.mkdirSync(audioDir, {recursive: true});
 
-			const ext = path.extname(filePath);
-			const baseName = path.basename(filePath, ext);
+			const ext = path.extname(sourceVideo);
+			const baseName = path.basename(sourceVideo, ext);
 			const destVideo = path.join(videoDir, `${baseName}${ext}`);
 			const destAudio = path.join(audioDir, `${baseName}.mp3`);
 
@@ -69,7 +91,7 @@ export const setupVideoIpc = () => {
 			});
 
 			try {
-				fs.copyFileSync(filePath, destVideo);
+				fs.copyFileSync(sourceVideo, destVideo);
 			} catch (err) {
 				console.error("Copy video failed:", err);
 				event.sender.send("import-local-complete", false);
@@ -149,10 +171,11 @@ export const setupVideoIpc = () => {
 	);
 
 	ipcMain.handle("check-final-video-ready", (_event, projectPath: string) => {
-		const videoDir = path.join(projectPath, "original", "video");
-		const srtDir = path.join(projectPath, "transcript");
-		const audioDir = path.join(projectPath, "audio_gene");
-		const finalPath = path.join(projectPath, "final", "final_video.mp4");
+		const safeProjectPath = assertProjectRoot(projectPath);
+		const videoDir = path.join(safeProjectPath, "original", "video");
+		const srtDir = path.join(safeProjectPath, "transcript");
+		const audioDir = path.join(safeProjectPath, "audio_gene");
+		const finalPath = path.join(safeProjectPath, "final", "final_video.mp4");
 
 		if (
 			!fs.existsSync(videoDir) ||
@@ -198,8 +221,9 @@ export const setupVideoIpc = () => {
 
 	ipcMain.on("create-final-video", async (event, projectPath: string, options?: { backgroundVolume?: number, fadeDuration?: number, lang?: string }) => {
 		try {
+			const safeProjectPath = assertProjectRoot(projectPath);
 			await createFinalVideo(
-                projectPath, 
+                safeProjectPath,
                 (p) => {
                     if (!event.sender.isDestroyed()) {
                         try {

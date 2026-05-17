@@ -3,15 +3,15 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.deleteProject = exports.updateProjectPin = exports.addProject = exports.getProjects = exports.connectDB = void 0;
+exports.deleteProject = exports.updateProjectPin = exports.upsertProject = exports.addProject = exports.getProjects = exports.connectDB = void 0;
 const better_sqlite3_1 = __importDefault(require("better-sqlite3"));
-const electron_1 = require("electron");
 const path_1 = __importDefault(require("path"));
+const AppPaths_1 = require("./AppPaths");
 let db = null;
 const connectDB = () => {
     if (db)
         return db;
-    const dbPath = path_1.default.join(electron_1.app.getPath('userData'), 'projects.db');
+    const dbPath = path_1.default.join((0, AppPaths_1.getAppUserDataPath)(), 'projects.db');
     try {
         db = new better_sqlite3_1.default(dbPath, {
             verbose: console.log
@@ -56,6 +56,34 @@ const addProject = (project) => {
     }
 };
 exports.addProject = addProject;
+const upsertProject = (project) => {
+    if (!db)
+        (0, exports.connectDB)();
+    try {
+        const existingByPath = db.prepare('SELECT * FROM projects WHERE path = ?').get(project.path);
+        if (existingByPath) {
+            db.prepare('UPDATE projects SET name = ?, pinned = ? WHERE id = ?')
+                .run(project.name, project.pinned ? 1 : 0, existingByPath.id);
+            const updated = db.prepare('SELECT * FROM projects WHERE id = ?').get(existingByPath.id);
+            return { ...updated, pinned: !!updated.pinned };
+        }
+        db.prepare(`
+            INSERT INTO projects (id, name, path, pinned)
+            VALUES (@id, @name, @path, @pinned)
+            ON CONFLICT(id) DO UPDATE SET
+                name = excluded.name,
+                path = excluded.path,
+                pinned = excluded.pinned
+        `).run({ ...project, pinned: project.pinned ? 1 : 0 });
+        const saved = db.prepare('SELECT * FROM projects WHERE id = ?').get(project.id);
+        return { ...saved, pinned: !!saved.pinned };
+    }
+    catch (error) {
+        console.error('Error upserting project:', error);
+        return null;
+    }
+};
+exports.upsertProject = upsertProject;
 const updateProjectPin = (id, pinned) => {
     if (!db)
         (0, exports.connectDB)();

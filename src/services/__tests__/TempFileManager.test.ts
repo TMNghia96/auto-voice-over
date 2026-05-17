@@ -56,6 +56,18 @@ describe('FinalVideoService - Memory Leak Fix (Bug #4)', () => {
         // Directory should be removed
         expect(fs.existsSync(dir)).toBe(false);
     });
+
+    it('should cleanup a specific directory even after unregister', async () => {
+        const dir = path.join(testTempDir, 'temp_final');
+        fs.mkdirSync(dir, { recursive: true });
+        fs.writeFileSync(path.join(dir, 'chunk.mp4'), 'data');
+
+        tempManager.register(dir);
+        tempManager.unregister(dir);
+        await tempManager.cleanupDirectory(dir);
+
+        expect(fs.existsSync(dir)).toBe(false);
+    });
     
     it('should handle cleanup of non-existent directories', async () => {
         const dir = path.join(testTempDir, 'non_existent');

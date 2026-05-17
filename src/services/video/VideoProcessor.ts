@@ -22,6 +22,7 @@ const execFileAsync = promisify(execFile);
  */
 export class VideoProcessor {
   private readonly config: VideoProcessorConfig;
+  private static readonly SPEED_EPSILON = 0.001;
 
   constructor(
     private readonly encoderFactory: EncoderFactory,
@@ -204,16 +205,11 @@ export class VideoProcessor {
     // Run FFmpeg concat
     try {
       if (useCopy) {
-        // Fast copy mode with fps filter to ensure CFR
         await this.spawnFfmpeg([
           '-f', 'concat',
           '-safe', '0',
           '-i', concatListPath,
-          '-vf', 'fps=30',
-          '-c:v', 'libx264',
-          '-preset', 'ultrafast',
-          '-crf', '18',
-          '-c:a', 'copy',
+          '-c', 'copy',
           '-y',
           outputPath,
         ]);
@@ -448,33 +444,59 @@ export class VideoProcessor {
     forceEncode: boolean = false
   ): Promise<string[]> {
     if (chunks.length === 0) return [];
-    const needEncode = chunks;
-    console.log(`[VideoProcessor] Chunks: ${chunks.length} total, ${needEncode.length} encode, 0 copy (safe render mode)`);
+    const shouldEncode = (chunk: { adjustedVideoSpeed: number }) =>
+      forceEncode || Math.abs(chunk.adjustedVideoSpeed - 1.0) > VideoProcessor.SPEED_EPSILON;
+    const encodeCount = chunks.filter(shouldEncode).length;
+    const copyCount = chunks.length - encodeCount;
+    console.log(`[VideoProcessor] Chunks: ${chunks.length} total, ${encodeCount} encode, ${copyCount} copy`);
 
-    let encoder: VideoEncoder | null = null;
-    if (needEncode.length > 0) {
-      encoder = await this.encoderFactory.createEncoder();
-      console.log(`[VideoProcessor] Using ${encoder.type.toUpperCase()} encoder: ${encoder.name}`);
-    }
+    let encoderPromise: Promise<VideoEncoder> | null = null;
+    const getEncoder = async () => {
+      if (!encoderPromise) {
+        encoderPromise = this.encoderFactory.createEncoder().then(created => {
+          console.log(`[VideoProcessor] Using ${created.type.toUpperCase()} encoder: ${created.name}`);
+          return created;
+        });
+      }
+      return encoderPromise;
+    };
 
-    const encodeLimit = encoder ? pLimit(encoder.type === 'gpu' ? 4 : 2) : pLimit(1);
+    const encoderForConcurrency = encodeCount > 0 ? await getEncoder() : null;
+    const concurrency = encoderForConcurrency?.type === 'gpu'
+      ? Math.max(1, Math.min(this.config.concurrency, 3))
+      : Math.max(1, Math.min(this.config.concurrency, 2));
+    const workLimit = pLimit(concurrency);
     let completed = 0;
     const outputPaths: string[] = new Array(chunks.length);
 
     const promises = chunks.map((chunk, index) => {
-      const executor = encodeLimit;
-      return executor(async () => {
+      return workLimit(async () => {
         try {
           const out = path.join(tempDir, `chunk_${String(index).padStart(4, '0')}.mp4`);
-          console.log(`[VideoProcessor] Encode chunk ${index}: start=${chunk.videoStart.toFixed(2)} dur=${chunk.videoDuration.toFixed(2)} speed=${chunk.adjustedVideoSpeed.toFixed(2)}`);
-          await this.encodeChunk(encoder!, chunk, index, originalVideo, out);
+          if (shouldEncode(chunk)) {
+            console.log(`[VideoProcessor] Encode chunk ${index}: start=${chunk.videoStart.toFixed(2)} dur=${chunk.videoDuration.toFixed(2)} speed=${chunk.adjustedVideoSpeed.toFixed(2)}`);
+            await this.encodeChunk(await getEncoder(), chunk, index, originalVideo, out);
+          } else {
+            console.log(`[VideoProcessor] Copy chunk ${index}: start=${chunk.videoStart.toFixed(2)} dur=${chunk.videoDuration.toFixed(2)}`);
+            await this.copyChunk(originalVideo, out, chunk.videoStart, chunk.videoDuration, index);
+          }
 
           const expectedDuration = chunk.videoDuration / Math.max(chunk.adjustedVideoSpeed, 0.001);
-          const actualDuration = await this.getMediaDuration(out);
+          let actualDuration = await this.getMediaDuration(out);
           if (actualDuration > 0 && Math.abs(actualDuration - expectedDuration) > 0.3) {
-            console.warn(
-              `Chunk ${index} duration mismatch: expected ${expectedDuration.toFixed(3)}s, got ${actualDuration.toFixed(3)}s (non-fatal)`
-            );
+            if (!shouldEncode(chunk)) {
+              console.warn(
+                `Copy chunk ${index} duration mismatch: expected ${expectedDuration.toFixed(3)}s, got ${actualDuration.toFixed(3)}s. Re-encoding chunk.`
+              );
+              await this.encodeChunk(await getEncoder(), chunk, index, originalVideo, out);
+              actualDuration = await this.getMediaDuration(out);
+            }
+
+            if (Math.abs(actualDuration - expectedDuration) > 0.3) {
+              console.warn(
+                `Chunk ${index} duration mismatch after processing: expected ${expectedDuration.toFixed(3)}s, got ${actualDuration.toFixed(3)}s (non-fatal)`
+              );
+            }
           }
 
           completed++;
@@ -500,7 +522,13 @@ export class VideoProcessor {
       try {
         await execFileAsync(getFfmpegPath(), [
           '-ss', startTime.toFixed(3), '-t', duration.toFixed(3),
-          '-i', originalVideo, '-c', 'copy', '-y', outputPath,
+          '-i', originalVideo,
+          '-map', '0:v:0',
+          '-c:v', 'copy',
+          '-an',
+          '-avoid_negative_ts', 'make_zero',
+          '-y',
+          outputPath,
         ], { timeout: 30000 });
         const stats = await fs.stat(outputPath);
         if (stats.size > 0) return;
@@ -545,5 +573,36 @@ export class VideoProcessor {
     console.log(`[Concat Copy] Concatenating ${segmentPaths.length} segments (stream copy)`);
     await this.spawnFfmpeg(['-f', 'concat', '-safe', '0', '-i', listPath, '-c', 'copy', '-y', outputPath], 60000);
     await fs.unlink(listPath).catch(() => {});
+  }
+
+  async normalizeVideoDuration(
+    inputPath: string,
+    outputPath: string,
+    expectedDuration: number,
+    actualDuration: number
+  ): Promise<void> {
+    const encoder = await this.encoderFactory.createEncoder();
+    const useGPU = encoder.type === 'gpu';
+    const expectedFixed = expectedDuration.toFixed(4);
+    const padDuration = Math.max(0, expectedDuration - actualDuration);
+    const filter = padDuration > 0.05
+      ? `trim=start=0:end=${expectedFixed},setpts=PTS-STARTPTS,fps=30,tpad=stop_mode=clone:stop_duration=${padDuration.toFixed(4)}`
+      : `trim=start=0:end=${expectedFixed},setpts=PTS-STARTPTS,fps=30`;
+
+    const videoArgs = useGPU
+      ? ['-c:v', encoder.name, '-quality', 'balanced', '-rc', 'cqp', '-qp_i', '23', '-qp_p', '23']
+      : ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23'];
+
+    console.log(`[VideoProcessor] Normalizing video duration to ${expectedDuration.toFixed(3)}s with ${encoder.name}`);
+    await this.spawnFfmpeg([
+      '-i', inputPath,
+      '-an',
+      '-vf', filter,
+      ...videoArgs,
+      '-r', '30',
+      '-vsync', 'cfr',
+      '-y',
+      outputPath,
+    ], 600000);
   }
 }

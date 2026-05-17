@@ -1,11 +1,25 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
+import os from 'os';
+import path from 'path';
 import { generateAllAudio, engine } from '../PiperService';
 import type { SrtEntryParams } from '../PiperService';
+
+let tempDir: string;
+
+const tempAudioDir = () => path.join(tempDir, 'audio_gene');
 
 describe('PiperService - Parallel Processing', () => {
     beforeEach(() => {
         vi.clearAllMocks();
+        tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'piper-service-test-'));
+    });
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+        if (tempDir && fs.existsSync(tempDir)) {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+        }
     });
 
     it('should generate audio faster with parallel processing than sequential', async () => {
@@ -24,13 +38,13 @@ describe('PiperService - Parallel Processing', () => {
         ];
 
         const sequentialStart = Date.now();
-        await generateAllAudio(entries, 'en', './test-output', () => {}, 1);
+        await generateAllAudio(entries, 'en', tempAudioDir(), () => {}, 1);
         const sequentialTime = Date.now() - sequentialStart;
 
         mockSynthesize.mockClear();
 
         const parallelStart = Date.now();
-        await generateAllAudio(entries, 'en', './test-output', () => {}, 3);
+        await generateAllAudio(entries, 'en', tempAudioDir(), () => {}, 3);
         const parallelTime = Date.now() - parallelStart;
 
         expect(parallelTime).toBeLessThan(sequentialTime * 0.7);
@@ -57,7 +71,7 @@ describe('PiperService - Parallel Processing', () => {
         }));
 
         const concurrencyLimit = 3;
-        await generateAllAudio(entries, 'en', './test-output', () => {}, concurrencyLimit);
+        await generateAllAudio(entries, 'en', tempAudioDir(), () => {}, concurrencyLimit);
 
         expect(mockSynthesize).toHaveBeenCalled();
         expect(maxConcurrent).toBeLessThanOrEqual(concurrencyLimit);
@@ -67,15 +81,32 @@ describe('PiperService - Parallel Processing', () => {
 });
 
 describe('generateVoicePreview', () => {
+    beforeEach(() => {
+        vi.clearAllMocks();
+        tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-preview-test-'));
+    });
+
+    afterEach(() => {
+        vi.restoreAllMocks();
+        if (tempDir && fs.existsSync(tempDir)) {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+        }
+    });
+
     it('should generate 3 random preview samples', async () => {
         const { generateVoicePreview } = await import('../PiperService');
+        vi.spyOn(engine, 'synthesizeToFile').mockImplementation(async (_text, _voice, outputPath) => {
+            fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+            fs.writeFileSync(outputPath, 'fake-preview-audio');
+            return true;
+        });
         const entries = Array.from({ length: 20 }, (_, i) => ({
             index: i + 1,
             text: `Sample text ${i + 1}`,
             startTime: '00:00:00,000',
             endTime: '00:00:02,000',
         }));
-        const result = await generateVoicePreview(entries, 'en-US-JennyNeural', '/tmp/project', 3);
+        const result = await generateVoicePreview(entries, 'en-US-JennyNeural', tempDir, 3);
         expect(result.voiceId).toBe('en-US-JennyNeural');
         expect(result.samples.length).toBe(3);
         expect(result.samples[0].index).toBeGreaterThan(2);
@@ -84,14 +115,19 @@ describe('generateVoicePreview', () => {
 
     it('should use cache for repeated previews', async () => {
         const { generateVoicePreview } = await import('../PiperService');
+        vi.spyOn(engine, 'synthesizeToFile').mockImplementation(async (_text, _voice, outputPath) => {
+            fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+            fs.writeFileSync(outputPath, 'fake-preview-audio');
+            return true;
+        });
         const entries = Array.from({ length: 10 }, (_, i) => ({
             index: i + 1,
             text: `Sample ${i + 1}`,
             startTime: '00:00:00,000',
             endTime: '00:00:02,000',
         }));
-        const result1 = await generateVoicePreview(entries, 'en-US-GuyNeural', '/tmp/project', 3);
-        const result2 = await generateVoicePreview(entries, 'en-US-GuyNeural', '/tmp/project', 3);
+        const result1 = await generateVoicePreview(entries, 'en-US-GuyNeural', tempDir, 3);
+        const result2 = await generateVoicePreview(entries, 'en-US-GuyNeural', tempDir, 3);
         expect(result1.samples).toEqual(result2.samples);
     }, 15000);
 });

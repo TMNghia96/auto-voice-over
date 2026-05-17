@@ -12,6 +12,28 @@ const ensureDir = (dir) => {
     if (!fs_1.default.existsSync(dir))
         fs_1.default.mkdirSync(dir, { recursive: true });
 };
+const removeDir = (dir) => {
+    if (fs_1.default.existsSync(dir))
+        fs_1.default.rmSync(dir, { recursive: true, force: true });
+};
+const moveFiles = (fromDir, toDir) => {
+    ensureDir(toDir);
+    const moved = [];
+    for (const file of fs_1.default.readdirSync(fromDir)) {
+        if (file.endsWith('.part') || file.endsWith('.ytdl'))
+            continue;
+        const from = path_1.default.join(fromDir, file);
+        const to = path_1.default.join(toDir, file);
+        if (!fs_1.default.statSync(from).isFile())
+            continue;
+        if (fs_1.default.existsSync(to))
+            fs_1.default.rmSync(to, { force: true });
+        fs_1.default.renameSync(from, to);
+        moved.push(to);
+    }
+    return moved;
+};
+const tail = (text, max = 1200) => text.length > max ? text.slice(-max) : text;
 const formatUploadDate = (uploadDate) => {
     if (uploadDate === undefined || uploadDate === null)
         return '';
@@ -113,13 +135,33 @@ const getVideoFormats = async (url) => {
     });
 };
 exports.getVideoFormats = getVideoFormats;
-const downloadVideo = async (url, projectPath, onProgress, formatId) => {
+const downloadVideo = async (url, projectPath, onProgress, options) => {
     return new Promise((resolve) => {
+        const normalizedOptions = typeof options === 'string' ? { formatId: options } : (options || {});
+        let settled = false;
+        let videoProc = null;
+        let audioProc = null;
+        let abortHandler = null;
+        const finish = (result) => {
+            if (settled)
+                return;
+            settled = true;
+            if (abortHandler && normalizedOptions.signal) {
+                normalizedOptions.signal.removeEventListener('abort', abortHandler);
+            }
+            resolve(result);
+        };
         try {
             const videoDir = path_1.default.join(projectPath, 'original', 'video');
             const audioDir = path_1.default.join(projectPath, 'original', 'audio');
+            const stagingRoot = path_1.default.join(projectPath, 'original', '.staging-download');
+            const stagingVideoDir = path_1.default.join(stagingRoot, 'video');
+            const stagingAudioDir = path_1.default.join(stagingRoot, 'audio');
             ensureDir(videoDir);
             ensureDir(audioDir);
+            removeDir(stagingRoot);
+            ensureDir(stagingVideoDir);
+            ensureDir(stagingAudioDir);
             const ytDlpPath = (0, EnvironmentService_1.getYtDlpPath)();
             const ffmpegPath = (0, EnvironmentService_1.getFfmpegPath)();
             let videoProgress = 0;
@@ -128,10 +170,57 @@ const downloadVideo = async (url, projectPath, onProgress, formatId) => {
             let audioFinished = false;
             let videoSucceeded = false;
             let audioSucceeded = false;
+            let videoExitCode = null;
+            let audioExitCode = null;
+            let videoError = '';
+            let audioError = '';
+            let cancelled = false;
             const checkDone = () => {
                 if (videoFinished && audioFinished) {
-                    onProgress({ video: 100, audio: 100 });
-                    resolve(videoSucceeded && audioSucceeded);
+                    if (cancelled) {
+                        removeDir(stagingRoot);
+                        finish({ success: false, cancelled: true, error: 'Tải video đã bị hủy.', videoExitCode, audioExitCode });
+                        return;
+                    }
+                    if (!videoSucceeded || !audioSucceeded) {
+                        removeDir(stagingRoot);
+                        const details = [
+                            !videoSucceeded ? `video failed${videoExitCode !== null ? ` (${videoExitCode})` : ''}: ${tail(videoError).trim()}` : '',
+                            !audioSucceeded ? `audio failed${audioExitCode !== null ? ` (${audioExitCode})` : ''}: ${tail(audioError).trim()}` : '',
+                        ].filter(Boolean).join('\n');
+                        finish({
+                            success: false,
+                            error: details || 'Tải video thất bại.',
+                            videoExitCode,
+                            audioExitCode,
+                        });
+                        return;
+                    }
+                    try {
+                        const videoPaths = moveFiles(stagingVideoDir, videoDir);
+                        const audioPaths = moveFiles(stagingAudioDir, audioDir);
+                        if (videoPaths.length === 0 || audioPaths.length === 0) {
+                            throw new Error('Tải hoàn tất nhưng không tìm thấy file video/audio đầu ra.');
+                        }
+                        removeDir(stagingRoot);
+                        onProgress({ video: 100, audio: 100 });
+                        finish({
+                            success: true,
+                            videoPath: videoPaths[0],
+                            audioPath: audioPaths[0],
+                            videoExitCode,
+                            audioExitCode,
+                        });
+                    }
+                    catch (error) {
+                        removeDir(stagingRoot);
+                        finish({
+                            success: false,
+                            error: error instanceof Error ? error.message : String(error),
+                            videoExitCode,
+                            audioExitCode,
+                        });
+                    }
                 }
             };
             const reportProgress = () => {
@@ -144,13 +233,23 @@ const downloadVideo = async (url, projectPath, onProgress, formatId) => {
                 }
                 return null;
             };
-            const videoFormat = formatId || 'bestvideo[ext=mp4][vcodec^=avc1]/bestvideo[ext=mp4]/bestvideo';
-            const videoProc = (0, child_process_1.spawn)(ytDlpPath, [
+            abortHandler = () => {
+                cancelled = true;
+                videoProc?.kill();
+                audioProc?.kill();
+            };
+            if (normalizedOptions.signal?.aborted) {
+                removeDir(stagingRoot);
+                finish({ success: false, cancelled: true, error: 'Tải video đã bị hủy.' });
+                return;
+            }
+            normalizedOptions.signal?.addEventListener('abort', abortHandler, { once: true });
+            const videoFormat = normalizedOptions.formatId || 'bestvideo[ext=mp4][vcodec^=avc1]/bestvideo[ext=mp4]/bestvideo';
+            videoProc = (0, child_process_1.spawn)(ytDlpPath, [
                 '-f', videoFormat,
                 '--ffmpeg-location', ffmpegPath,
-                '-o', path_1.default.join(videoDir, '%(id)s.%(ext)s'),
+                '-o', path_1.default.join(stagingVideoDir, '%(id)s.%(ext)s'),
                 '--newline',
-                '--no-part', // Avoid .part files for smoother progress tracking?
                 url
             ]);
             videoProc.stdout.on('data', (data) => {
@@ -163,6 +262,7 @@ const downloadVideo = async (url, projectPath, onProgress, formatId) => {
             });
             videoProc.stderr.on('data', (data) => {
                 const text = data.toString();
+                videoError += text;
                 const pct = parseProgress(text);
                 if (pct !== null) {
                     videoProgress = pct;
@@ -171,6 +271,7 @@ const downloadVideo = async (url, projectPath, onProgress, formatId) => {
             });
             videoProc.on('close', (code) => {
                 console.log('Video download finished, exit code:', code);
+                videoExitCode = code;
                 videoSucceeded = code === 0;
                 videoProgress = videoSucceeded ? 100 : 0;
                 videoFinished = true;
@@ -179,19 +280,19 @@ const downloadVideo = async (url, projectPath, onProgress, formatId) => {
             });
             videoProc.on('error', (err) => {
                 console.error('Video download error:', err);
+                videoError += err.message;
                 videoFinished = true; // Mark finished to avoid hanging? Or resolve false?
                 videoSucceeded = false;
                 videoProgress = 0; // or 100?
                 checkDone();
             });
-            const audioProc = (0, child_process_1.spawn)(ytDlpPath, [
+            audioProc = (0, child_process_1.spawn)(ytDlpPath, [
                 '-f', 'bestaudio[ext=m4a]/bestaudio',
                 '--ffmpeg-location', ffmpegPath,
                 '--extract-audio',
                 '--audio-format', 'mp3',
-                '-o', path_1.default.join(audioDir, '%(id)s.%(ext)s'),
+                '-o', path_1.default.join(stagingAudioDir, '%(id)s.%(ext)s'),
                 '--newline',
-                '--no-part',
                 url
             ]);
             audioProc.stdout.on('data', (data) => {
@@ -204,6 +305,7 @@ const downloadVideo = async (url, projectPath, onProgress, formatId) => {
             });
             audioProc.stderr.on('data', (data) => {
                 const text = data.toString();
+                audioError += text;
                 const pct = parseProgress(text);
                 if (pct !== null) {
                     audioProgress = pct;
@@ -212,6 +314,7 @@ const downloadVideo = async (url, projectPath, onProgress, formatId) => {
             });
             audioProc.on('close', (code) => {
                 console.log('Audio download finished, exit code:', code);
+                audioExitCode = code;
                 audioSucceeded = code === 0;
                 audioProgress = audioSucceeded ? 100 : 0;
                 audioFinished = true;
@@ -220,6 +323,7 @@ const downloadVideo = async (url, projectPath, onProgress, formatId) => {
             });
             audioProc.on('error', (err) => {
                 console.error('Audio download error:', err);
+                audioError += err.message;
                 audioFinished = true;
                 audioSucceeded = false;
                 checkDone();
@@ -227,7 +331,7 @@ const downloadVideo = async (url, projectPath, onProgress, formatId) => {
         }
         catch (error) {
             console.error("Download failed:", error);
-            resolve(false);
+            finish({ success: false, error: error instanceof Error ? error.message : String(error) });
         }
     });
 };

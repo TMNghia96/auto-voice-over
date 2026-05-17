@@ -59,8 +59,7 @@ export const ProjectAutoPage = () => {
                 setProjectName(proj.name);
             }
 
-            const apiKey = await window.api.getApiKey("deepseek");
-            setHasApiKey(!!apiKey);
+            setHasApiKey(await window.api.hasApiKey("deepseek"));
 
             const loadedPrompts = await window.api.getPrompts();
             setPrompts(loadedPrompts);
@@ -150,20 +149,6 @@ export const ProjectAutoPage = () => {
                 if (!srtData) throw new Error("Không tìm thấy file SRT");
 
                 const srtEntries = parseSrt(srtData.srtContent);
-                const apiKey = await window.api.getApiKey("deepseek");
-                const langName = TARGET_LANGUAGES.find(l => l.code === targetLanguage)?.name || targetLanguage;
-                const promptConfig = prompts.find(p => p.id === selectedPromptId) || prompts[0];
-                const userPrompt = promptConfig?.systemPrompt || "";
-
-                const systemPrompt = `Translate subtitle segments to ${langName}.
-
-FORMAT RULES:
-- Each segment is separated by "---"
-- Return ONLY the translated segments separated by "---", nothing else
-- Preserve the same number of segments
-- Do NOT add any extra text, explanation, or numbering
-
-${userPrompt}`.trim();
 
                 const BATCH_SIZE = 20;
                 const CONCURRENCY = 5;
@@ -176,23 +161,12 @@ ${userPrompt}`.trim();
                 const translatedMap = new Map<number, string>();
 
                 const processBatch = async (batch: any[]) => {
-                    const textsToTranslate = batch.map((e: any) => e.text).join("\n---\n");
                     try {
-                        const response = await fetch("https://api.deepseek.com/chat/completions", {
-                            method: "POST",
-                            headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
-                            body: JSON.stringify({
-                                model: "deepseek-chat",
-                                messages: [
-                                    { role: "system", content: systemPrompt },
-                                    { role: "user", content: textsToTranslate },
-                                ],
-                                temperature: 0.3
-                            })
-                        });
-                        if (!response.ok) throw new Error(await response.text());
-                        const data = await response.json();
-                        const translatedParts = (data.choices?.[0]?.message?.content || "").split(/\n?---\n?/);
+                        const translatedParts = await window.api.translateSegments(
+                            targetLanguage,
+                            batch.map((e: any) => e.text),
+                            selectedPromptId,
+                        );
                         batch.forEach((entry: any, idx: number) => {
                             translatedMap.set(entry.index, translatedParts[idx]?.trim() || entry.text);
                         });

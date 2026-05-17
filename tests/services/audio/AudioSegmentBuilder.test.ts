@@ -23,17 +23,15 @@ const childMock = vi.hoisted(() => {
   return { spawnFn, durationRef };
 });
 
-const mockSpawn = childMock.spawnFn;
 const mockDurationStr = childMock.durationRef;
 
-vi.mock(import('child_process'), async (importOriginal) => ({
-  ...(await importOriginal()),
-  spawn: childMock.spawnFn,
-}));
-
 vi.mock('child_process', () => ({
-  spawn: mockSpawn,
-  default: {},
+  spawn: childMock.spawnFn,
+  exec: vi.fn(),
+  default: {
+    spawn: childMock.spawnFn,
+    exec: vi.fn(),
+  },
 }));
 
 vi.mock('electron', () => ({

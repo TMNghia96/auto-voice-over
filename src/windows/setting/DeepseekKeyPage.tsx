@@ -9,14 +9,15 @@ export const DeepseekKeyPage = () => {
     const [showKey, setShowKey] = useState(false);
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
+    const [hasExistingKey, setHasExistingKey] = useState(false);
 
     useEffect(() => {
         loadKey();
     }, []);
 
     const loadKey = async () => {
-        const key = await window.api.getApiKey("deepseek");
-        setApiKey(key || "");
+        setHasExistingKey(await window.api.hasApiKey("deepseek"));
+        setApiKey("");
     };
 
     const handleSave = async () => {
@@ -25,6 +26,7 @@ export const DeepseekKeyPage = () => {
         setSaving(false);
 
         if (success) {
+            setHasExistingKey(apiKey.trim().length > 0);
             setSaved(true);
             setTimeout(() => setSaved(false), 2500);
         }
@@ -45,7 +47,7 @@ export const DeepseekKeyPage = () => {
                     <div className="relative flex-1">
                         <Input
                             type={showKey ? "text" : "password"}
-                            placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                            placeholder={hasExistingKey ? "Đã lưu API key. Nhập key mới để thay thế." : "sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
                             value={apiKey}
                             onChange={(e) => setApiKey(e.target.value)}
                             className="pr-10 font-mono text-sm"

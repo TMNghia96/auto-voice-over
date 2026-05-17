@@ -11,18 +11,26 @@ import { SrtRepository } from "../services/tts/SrtRepository";
 import { getVoicePreference, setVoicePreference, loadProjectConfig, saveProjectConfig } from "../services/ProjectConfig";
 import fs from "fs";
 import path from "path";
+import { assertAudioFile, assertProjectRoot, assertSrtFile } from "../services/PathSecurity";
 
 let abortController: AbortController | null = null;
 
 export const setupAudioIpc = () => {
     ipcMain.handle("get-existing-srt", (_event, projectPath) => {
-        return getExistingSrt(projectPath);
+        return getExistingSrt(assertProjectRoot(projectPath));
     });
 
     ipcMain.on("transcribe-audio", (event, projectPath, engine, language) => {
         console.log(`[IPC] Received transcribe-audio: engine=${engine}, language=${language}, path=${projectPath}`);
+        let safeProjectPath: string;
+        try {
+            safeProjectPath = assertProjectRoot(projectPath);
+        } catch {
+            event.sender.send("transcript-complete", null);
+            return;
+        }
         transcribeAudio(
-            projectPath,
+            safeProjectPath,
             (progress) => {
                 event.sender.send("transcript-progress", progress);
             },
@@ -35,7 +43,7 @@ export const setupAudioIpc = () => {
 
     ipcMain.handle("optimize-srt", (_event, srtPath: string) => {
         try {
-            const optimized = optimizeSrtFile(srtPath);
+            const optimized = optimizeSrtFile(assertSrtFile(srtPath));
             return { srtContent: optimized };
         } catch (error) {
             console.error("SRT optimization failed:", error);
@@ -47,7 +55,7 @@ export const setupAudioIpc = () => {
         "save-translated-srt",
         (_event, projectPath: string, lang: string, content: string) => {
             try {
-                const repo = new SrtRepository(projectPath);
+                const repo = new SrtRepository(assertProjectRoot(projectPath));
                 return repo.save(lang, content);
             } catch (error) {
                 console.error("Failed to save translated SRT:", error);
@@ -59,18 +67,19 @@ export const setupAudioIpc = () => {
     ipcMain.handle(
         "get-translated-srt",
         (_event, projectPath: string, lang: string) => {
-            const repo = new SrtRepository(projectPath);
+            const repo = new SrtRepository(assertProjectRoot(projectPath));
             return repo.load(lang);
         },
     );
 
     ipcMain.handle("read-audio-file", (_event, projectPath: string) => {
-        const audioPath = path.join(projectPath, "transcript", "audio_16k.wav");
+        const safeProjectPath = assertProjectRoot(projectPath);
+        const audioPath = path.join(safeProjectPath, "transcript", "audio_16k.wav");
         if (fs.existsSync(audioPath)) {
             const buffer = fs.readFileSync(audioPath);
             return { buffer: buffer.buffer, mimeType: "audio/wav" };
         }
-        const originalDir = path.join(projectPath, "original", "audio");
+        const originalDir = path.join(safeProjectPath, "original", "audio");
         if (fs.existsSync(originalDir)) {
             const files = fs.readdirSync(originalDir);
             const audioFile = files.find((f) =>
@@ -101,7 +110,8 @@ export const setupAudioIpc = () => {
         async (event, projectPath: string, lang: string, voiceId?: string) => {
             abortController = new AbortController();
             try {
-                const repo = new SrtRepository(projectPath);
+                const safeProjectPath = assertProjectRoot(projectPath);
+                const repo = new SrtRepository(safeProjectPath);
                 const srtContent = repo.load(lang);
                 if (!srtContent) {
                     event.sender.send("audio-generate-progress", {
@@ -132,12 +142,12 @@ export const setupAudioIpc = () => {
                     return;
                 }
 
-                const outManager = new TtsOutputManager(projectPath);
+                const outManager = new TtsOutputManager(safeProjectPath);
                 outManager.clearSegments();
                 outManager.ensureExists();
 
                 const voiceName = resolveVoiceName(lang, voiceId)!;
-                const config = loadProjectConfig(projectPath);
+                const config = loadProjectConfig(safeProjectPath);
                 const concurrency = config.concurrencySettings?.initial ?? 10;
                 const results = await generateAllAudio(
                     entries.map((e: { index: number; text: string }) => ({ index: e.index, text: e.text })),
@@ -192,7 +202,8 @@ export const setupAudioIpc = () => {
         "generate-single-audio",
         async (event, projectPath: string, lang: string, targetIndex: number, voiceId?: string) => {
             try {
-                const repo = new SrtRepository(projectPath);
+                const safeProjectPath = assertProjectRoot(projectPath);
+                const repo = new SrtRepository(safeProjectPath);
                 const srtContent = repo.load(lang);
                 if (!srtContent) {
                     event.sender.send("audio-generate-progress", {
@@ -238,7 +249,7 @@ export const setupAudioIpc = () => {
                     entryStatus: "start"
                 });
 
-                const outManager = new TtsOutputManager(projectPath);
+                const outManager = new TtsOutputManager(safeProjectPath);
                 outManager.ensureExists();
 
                 const outputPath = outManager.segmentPath(targetIndex);
@@ -279,20 +290,24 @@ export const setupAudioIpc = () => {
     );
 
     ipcMain.handle("list-generated-audio", (_event, projectPath: string) => {
-        const outManager = new TtsOutputManager(projectPath);
+        const outManager = new TtsOutputManager(assertProjectRoot(projectPath));
         return outManager.listSegments();
     });
 
     ipcMain.handle("read-generated-audio", (_event, filePath: string) => {
-        const outManager = new TtsOutputManager(path.dirname(filePath));
-        return outManager.readSegment(filePath);
+        const safeFilePath = assertAudioFile(filePath);
+        const buffer = fs.readFileSync(safeFilePath);
+        const ext = path.extname(safeFilePath).toLowerCase();
+        const mime = ext === ".wav" ? "audio/wav" : "audio/mpeg";
+        return `data:${mime};base64,${buffer.toString("base64")}`;
     });
 
     ipcMain.handle(
         "generate-voice-preview",
         async (_event, projectPath: string, lang: string, voiceId: string) => {
             try {
-                const repo = new SrtRepository(projectPath);
+                const safeProjectPath = assertProjectRoot(projectPath);
+                const repo = new SrtRepository(safeProjectPath);
                 const srtContent = repo.load(lang);
                 if (!srtContent) {
                     return { error: "Không tìm thấy file SRT đã dịch!" };
@@ -301,7 +316,7 @@ export const setupAudioIpc = () => {
                 if (entries.length < 5) {
                     return { error: "Cần ít nhất 5 đoạn phụ đề để tạo preview" };
                 }
-                const result = await generateVoicePreview(entries, voiceId, projectPath, 3);
+                const result = await generateVoicePreview(entries, voiceId, safeProjectPath, 3);
                 return { success: true, result };
             } catch (err) {
                 console.error("Preview generation failed:", err);
@@ -314,7 +329,8 @@ export const setupAudioIpc = () => {
         "retry-failed-audio",
         async (event, projectPath: string, lang: string, failedIndices: number[], voiceId?: string) => {
             try {
-                const repo = new SrtRepository(projectPath);
+                const safeProjectPath = assertProjectRoot(projectPath);
+                const repo = new SrtRepository(safeProjectPath);
                 const srtContent = repo.load(lang);
                 if (!srtContent) {
                     return { success: false, error: "Không tìm thấy file SRT đã dịch!" };
@@ -324,9 +340,9 @@ export const setupAudioIpc = () => {
                 if (failedEntries.length === 0) {
                     return { success: false, error: "Không có đoạn nào cần tạo lại" };
                 }
-                const outManager = new TtsOutputManager(projectPath);
+                const outManager = new TtsOutputManager(safeProjectPath);
                 outManager.ensureExists();
-                const config = loadProjectConfig(projectPath);
+                const config = loadProjectConfig(safeProjectPath);
                 const concurrency = config.concurrencySettings?.initial ?? 10;
                 const results = await generateAllAudio(
                     failedEntries.map((e: { index: number; text: string }) => ({ index: e.index, text: e.text })),
@@ -346,16 +362,16 @@ export const setupAudioIpc = () => {
     );
 
     ipcMain.handle("get-voice-preference", (_event, projectPath: string, lang: string) => {
-        return getVoicePreference(projectPath, lang);
+        return getVoicePreference(assertProjectRoot(projectPath), lang);
     });
     ipcMain.handle("set-voice-preference", (_event, projectPath: string, lang: string, voiceId: string) => {
-        setVoicePreference(projectPath, lang, voiceId);
+        setVoicePreference(assertProjectRoot(projectPath), lang, voiceId);
         return { success: true };
     });
 
     ipcMain.handle("cleanup-old-previews", (_event, projectPath: string) => {
         try {
-            cleanupOldPreviews(projectPath);
+            cleanupOldPreviews(assertProjectRoot(projectPath));
             return { success: true };
         } catch (err) {
             console.error("Preview cleanup failed:", err);
@@ -364,14 +380,15 @@ export const setupAudioIpc = () => {
     });
 
     ipcMain.handle("get-concurrency-settings", (_event, projectPath: string) => {
-        const config = loadProjectConfig(projectPath);
+        const config = loadProjectConfig(assertProjectRoot(projectPath));
         return config.concurrencySettings ?? { initial: 10, min: 1, max: 20 };
     });
 
     ipcMain.handle("set-concurrency-settings", (_event, projectPath: string, settings: { initial: number; min: number; max: number }) => {
-        const config = loadProjectConfig(projectPath);
+        const safeProjectPath = assertProjectRoot(projectPath);
+        const config = loadProjectConfig(safeProjectPath);
         config.concurrencySettings = settings;
-        saveProjectConfig(projectPath, config);
+        saveProjectConfig(safeProjectPath, config);
         return { success: true };
     });
 

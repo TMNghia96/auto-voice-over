@@ -26,8 +26,9 @@ interface Window {
 
         openSettingsWindow: () => Promise<void>;
 
-        getApiKey: (provider: string) => Promise<string>;
+        hasApiKey: (provider: string) => Promise<boolean>;
         setApiKey: (provider: string, key: string) => Promise<boolean>;
+        translateSegments: (targetLang: string, texts: string[], promptId?: string) => Promise<string[]>;
         getPrompts: () => Promise<{ id: string; name: string; systemPrompt: string; isDefault?: boolean }[]>;
         savePrompts: (prompts: { id: string; name: string; systemPrompt: string; isDefault?: boolean }[]) => Promise<boolean>;
         getActivePromptId: () => Promise<string>;

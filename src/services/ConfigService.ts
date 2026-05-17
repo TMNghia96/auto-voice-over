@@ -1,11 +1,13 @@
 import fs from 'fs';
 import path from 'path';
 import { app } from 'electron';
+import { getAppUserDataPath } from './AppPaths';
+import { assertProjectRoot, sanitizeProjectName } from './PathSecurity';
 
 const isDev = process.env.NODE_ENV === 'development' || !app.isPackaged;
 const CONFIG_PATH = isDev
     ? path.join(process.cwd(), 'src/config/config.json')
-    : path.join(app.getPath('userData'), 'config.json');
+    : path.join(getAppUserDataPath(), 'config.json');
 
 const readConfig = (): Record<string, any> => {
     try {
@@ -48,6 +50,10 @@ export const getApiKey = (provider: string): string => {
     return config.apiKeys?.[provider] || "";
 };
 
+export const hasApiKey = (provider: string): boolean => {
+    return getApiKey(provider).trim().length > 0;
+};
+
 export const setApiKey = (provider: string, key: string): boolean => {
     const config = readConfig();
     const apiKeys = { ...(config.apiKeys || {}), [provider]: key };
@@ -56,7 +62,12 @@ export const setApiKey = (provider: string, key: string): boolean => {
 
 export const createProjectFolder = (basePath: string, projectName: string): boolean => {
     try {
-        const targetDir = path.join(basePath, projectName);
+        if (!basePath || !fs.existsSync(basePath) || !fs.statSync(basePath).isDirectory()) {
+            return false;
+        }
+
+        const safeProjectName = sanitizeProjectName(projectName);
+        const targetDir = path.join(fs.realpathSync(basePath), safeProjectName);
 
         if (fs.existsSync(targetDir)) {
             return false;
@@ -66,7 +77,7 @@ export const createProjectFolder = (basePath: string, projectName: string): bool
 
         const metadata = {
             id: Date.now().toString(), // Simple ID, or passed from DB?
-            name: projectName,
+            name: safeProjectName,
             createdAt: new Date().toISOString(),
             status: 'created'
         };
@@ -83,8 +94,9 @@ export const createProjectFolder = (basePath: string, projectName: string): bool
 
 export const deleteProjectFolder = (projectPath: string): boolean => {
     try {
-        if (fs.existsSync(projectPath)) {
-            fs.rmSync(projectPath, { recursive: true, force: true });
+        const safeProjectPath = assertProjectRoot(projectPath);
+        if (fs.existsSync(safeProjectPath)) {
+            fs.rmSync(safeProjectPath, { recursive: true, force: true });
         }
         return true;
     } catch (error) {
@@ -95,7 +107,8 @@ export const deleteProjectFolder = (projectPath: string): boolean => {
 
 export const getProjectMetadata = (projectPath: string): any => {
     try {
-        const configFile = path.join(projectPath, 'project.json');
+        const safeProjectPath = assertProjectRoot(projectPath);
+        const configFile = path.join(safeProjectPath, 'project.json');
         if (fs.existsSync(configFile)) {
             const data = fs.readFileSync(configFile, 'utf-8');
             return JSON.parse(data);
@@ -108,7 +121,8 @@ export const getProjectMetadata = (projectPath: string): any => {
 
 export const saveProjectMetadata = (projectPath: string, metadata: any): boolean => {
     try {
-        const configFile = path.join(projectPath, 'project.json');
+        const safeProjectPath = assertProjectRoot(projectPath);
+        const configFile = path.join(safeProjectPath, 'project.json');
 
         let existing = {};
         if (fs.existsSync(configFile)) {

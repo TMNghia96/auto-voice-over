@@ -333,19 +333,48 @@ export class AudioProcessor {
 
     async concatenateAudio(
         segmentPaths: string[],
-        tempDir: string
+        tempDir: string,
+        expectedDuration?: number
     ): Promise<string> {
         const listPath = path.join(tempDir, 'concat_list.txt');
         const listContent = segmentPaths.map(p => `file '${p.replace(/\\/g, '/')}'`).join('\n');
         fs.writeFileSync(listPath, listContent, 'utf-8');
 
         const finalAudioWav = path.join(tempDir, 'final_mixed_audio.wav');
+        const filters = ['aresample=async=1:first_pts=0'];
+        if (expectedDuration && expectedDuration > 0) {
+            const expectedFixed = expectedDuration.toFixed(4);
+            filters.push(`apad,atrim=0:${expectedFixed}`);
+        }
+
         const concatRes = await this.runFfmpeg([
-            '-y', '-f', 'concat', '-safe', '0', '-i', listPath, '-c:a', 'copy', finalAudioWav
+            '-y',
+            '-fflags', '+genpts',
+            '-f', 'concat',
+            '-safe', '0',
+            '-i', listPath,
+            '-vn',
+            '-af', filters.join(','),
+            '-ar', '44100',
+            '-ac', '2',
+            '-c:a', 'pcm_s16le',
+            finalAudioWav
         ]);
 
         if (!concatRes.success || !fs.existsSync(finalAudioWav)) {
             throw new Error(`Lỗi kết nối âm thanh: ${concatRes.stderr}`);
+        }
+
+        if (expectedDuration && expectedDuration > 0) {
+            const actualDuration = await this.getMediaDuration(finalAudioWav);
+            const drift = actualDuration - expectedDuration;
+            console.log(`[Audio] Concatenated duration: expected=${expectedDuration.toFixed(3)}s, actual=${actualDuration.toFixed(3)}s, drift=${drift.toFixed(3)}s`);
+
+            if (actualDuration === 0 || Math.abs(drift) > 0.25) {
+                throw new Error(
+                    `Âm thanh sau khi gộp lệch ${drift.toFixed(3)}s so với video (expected=${expectedDuration.toFixed(3)}s, actual=${actualDuration.toFixed(3)}s)`
+                );
+            }
         }
 
         return finalAudioWav;

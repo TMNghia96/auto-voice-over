@@ -1,5 +1,5 @@
 import { _electron as electron, ElectronApplication, Page } from 'playwright';
-import { test, expect, beforeAll, afterAll } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import path from 'path';
 import fs from 'fs';
 import os from 'os';
@@ -42,7 +42,7 @@ function createTestSrt(): string {
   ].join('\n');
 }
 
-beforeAll(async () => {
+test.beforeAll(async () => {
   fs.mkdirSync(path.join(TEST_PROJECT_PATH, 'translate'), { recursive: true });
   fs.mkdirSync(path.join(TEST_PROJECT_PATH, 'audio_gene'), { recursive: true });
   fs.mkdirSync(path.join(TEST_PROJECT_PATH, '.auto-voice-over'), { recursive: true });
@@ -56,7 +56,7 @@ beforeAll(async () => {
   );
 });
 
-afterAll(async () => {
+test.afterAll(async () => {
   if (fs.existsSync(TEST_PROJECT_PATH)) {
     fs.rmSync(TEST_PROJECT_PATH, { recursive: true, force: true });
   }
@@ -64,6 +64,7 @@ afterAll(async () => {
 
 async function mockWindowApi(window: Page, projectPath: string) {
   await window.evaluate((projPath) => {
+    const browserWindow = globalThis as any;
     const mockProjects = [{
       id: projPath,
       name: 'E2E Test Project',
@@ -113,36 +114,36 @@ async function mockWindowApi(window: Page, projectPath: string) {
       { id: 'en-US-JaneNeural', name: 'Jane', gender: 'Female', language: 'en', label: 'Jane', isPreset: false },
     ];
 
-    window.api = {
-      ...window.api,
+    browserWindow.api = {
+      ...browserWindow.api,
       getProjects: async () => mockProjects,
       getTranslatedSrt: async (_projectPath: string, lang: string) => {
         return lang === 'en' ? mockSrtContent : null;
       },
       getVoicePreference: async (_projectPath: string, lang: string) => {
-        if (lang === 'en' && window.__e2e_voice_pref) {
-          return window.__e2e_voice_pref;
+        if (lang === 'en' && browserWindow.__e2e_voice_pref) {
+          return browserWindow.__e2e_voice_pref;
         }
         return undefined;
       },
       setVoicePreference: async (_projectPath: string, _lang: string, _voiceId: string) => {
-        (window as any).__e2e_last_set_voice = _voiceId;
+        browserWindow.__e2e_last_set_voice = _voiceId;
         return { success: true };
       },
-      listGeneratedAudio: async () => [],
+      listGeneratedAudio: async (): Promise<any[]> => [],
       generateAudio: async (_projectPath: string, _lang: string, _voiceId?: string) => {
         const totalEntries = 6;
         let completed = 0;
         const failedIndices: number[] = [];
         cancelled = false;
 
-        const errorType = (window as any).__e2e_error_type || null;
+        const errorType = browserWindow.__e2e_error_type || null;
 
         for (let i = 0; i < totalEntries; i++) {
           if (cancelled) break;
 
           const entryIndex = i + 1;
-          const isFailedEntry = (window as any).__e2e_failed_indices?.includes(entryIndex);
+          const isFailedEntry = browserWindow.__e2e_failed_indices?.includes(entryIndex);
           const isNetworkError = errorType === 'network';
           const isAuthError = errorType === 'auth';
           const isServerError = errorType === 'server';
@@ -296,7 +297,7 @@ async function mockWindowApi(window: Page, projectPath: string) {
         return { success: true, successCount: failedIndices.length, totalCount: failedIndices.length };
       },
       generateVoicePreview: async (_projectPath: string, _lang: string, _voiceId: string) => {
-        const delay = (window as any).__e2e_preview_delay || 0;
+        const delay = browserWindow.__e2e_preview_delay || 0;
         if (delay > 0) {
           await sleep(delay);
         }
@@ -345,7 +346,7 @@ test.describe('TTS Workflow E2E', () => {
 
   async function navigateToAudioTab() {
     await window.evaluate((projPath) => {
-      window.location.hash = `/project/${encodeURIComponent(projPath)}?tab=audio`;
+      globalThis.location.hash = `/project/${encodeURIComponent(projPath)}?tab=audio`;
     }, TEST_PROJECT_PATH);
     await window.waitForTimeout(1500);
   }
@@ -428,8 +429,9 @@ test.describe('TTS Workflow E2E', () => {
 
     await window.evaluate(() => {
       (window as any).__e2e_preview_call_count = 0;
-      const origPreview = window.api.generateVoicePreview;
-      window.api.generateVoicePreview = async (...args: any[]) => {
+      const browserWindow = globalThis as any;
+      const origPreview = browserWindow.api.generateVoicePreview;
+      browserWindow.api.generateVoicePreview = async (...args: any[]) => {
         (window as any).__e2e_preview_call_count++;
         return origPreview(...args);
       };

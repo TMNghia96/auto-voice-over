@@ -3,6 +3,16 @@ import { AudioProcessor } from '../../../src/services/audio/AudioProcessor';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { spawnSync } from 'child_process';
+
+vi.mock('electron', () => ({
+    app: {
+        isPackaged: true,
+        getPath: () => 'C:\\tmp',
+        setName: vi.fn(),
+        setPath: vi.fn(),
+    },
+}));
 
 describe('AudioProcessor', () => {
     let tempDir: string;
@@ -351,6 +361,37 @@ describe('AudioProcessor', () => {
     });
 
     describe('concatenateAudio', () => {
+        const hasFfmpeg = () => spawnSync(mockFfmpegPath, ['-version']).status === 0;
+
+        const createSilenceWav = (filePath: string, duration: number) => {
+            const result = spawnSync(mockFfmpegPath, [
+                '-y',
+                '-f', 'lavfi',
+                '-i', 'anullsrc=r=44100:cl=stereo',
+                '-t', duration.toFixed(3),
+                '-c:a', 'pcm_s16le',
+                filePath,
+            ]);
+
+            expect(result.status).toBe(0);
+        };
+
+        const getDuration = (filePath: string) => {
+            const result = spawnSync(mockFfmpegPath, ['-i', filePath, '-f', 'null', '-'], {
+                encoding: 'utf-8',
+            });
+            const stderr = result.stderr || '';
+            const match = stderr.match(/Duration:\s*(\d+):(\d+):(\d+)\.(\d+)/);
+            expect(match).not.toBeNull();
+            const [, hours, minutes, seconds, decimals] = match!;
+            return (
+                Number(hours) * 3600 +
+                Number(minutes) * 60 +
+                Number(seconds) +
+                Number(`0.${decimals}`)
+            );
+        };
+
         it('should throw error if concat fails', async () => {
             const segmentPaths = [
                 path.join(tempDir, 'nonexistent1.wav'),
@@ -417,6 +458,22 @@ describe('AudioProcessor', () => {
                 // FFmpeg might fail in test environment
                 expect(error).toBeDefined();
             }
+        });
+
+        it('should pad concatenated audio to the expected duration', async () => {
+            if (!hasFfmpeg()) return;
+
+            const segmentPaths = [
+                path.join(tempDir, 'seg1.wav'),
+                path.join(tempDir, 'seg2.wav')
+            ];
+            createSilenceWav(segmentPaths[0], 0.1);
+            createSilenceWav(segmentPaths[1], 0.1);
+
+            const result = await processor.concatenateAudio(segmentPaths, tempDir, 0.8);
+            const duration = getDuration(result);
+
+            expect(duration).toBeCloseTo(0.8, 1);
         });
 
         it('should handle Windows paths correctly', async () => {

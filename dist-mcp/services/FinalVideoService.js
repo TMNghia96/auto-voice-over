@@ -220,11 +220,20 @@ const buildVideoChunks = (segments) => {
     console.log(`[FinalVideoService] Merged ${segments.length} segments → ${chunks.length} video chunks (${chunks.filter(c => Math.abs(c.adjustedVideoSpeed - 1.0) > 0.001).length} need re-encode)`);
     return chunks;
 };
+const createPhaseTimer = () => {
+    let last = Date.now();
+    return (phase) => {
+        const now = Date.now();
+        console.log(`[FinalVideoService] Timing ${phase}: ${((now - last) / 1000).toFixed(2)}s`);
+        last = now;
+    };
+};
 const createFinalVideo = async (projectPath, onProgress, duckVolume = 0.15, config) => {
     try {
         exports.isCancelled = false;
         activeProcesses = [];
         const startTime = Date.now();
+        const markPhase = createPhaseTimer();
         // Validate ffmpeg exists
         const ffmpegPath = (0, EnvironmentService_1.getFfmpegPath)();
         if (!fs_1.default.existsSync(ffmpegPath)) {
@@ -289,6 +298,7 @@ const createFinalVideo = async (projectPath, onProgress, duckVolume = 0.15, conf
         const videoDuration = videoMeta.duration;
         const vidHasAudio = videoMeta.hasAudio;
         console.log('[FinalVideoService] Video duration:', videoDuration, 'hasAudio:', vidHasAudio);
+        markPhase('metadata');
         const tempDir = path_1.default.join(projectPath, 'temp_final');
         // Clean up existing temp directory
         if (fs_1.default.existsSync(tempDir)) {
@@ -312,6 +322,7 @@ const createFinalVideo = async (projectPath, onProgress, duckVolume = 0.15, conf
             onProgress({ status: 'error', progress: 0, detail: 'Không có phân đoạn nào để xử lý!' });
             return null;
         }
+        markPhase('segment-map');
         // 3. Prepare full audio
         onProgress({ status: 'preparing', progress: 15, detail: 'Đang chuẩn bị luồng âm thanh gốc...' });
         const externalAudio = findOriginalAudio(projectPath);
@@ -330,6 +341,7 @@ const createFinalVideo = async (projectPath, onProgress, duckVolume = 0.15, conf
             onProgress({ status: 'error', progress: 15, detail: 'Lỗi khởi tạo âm thanh gốc.' });
             return null;
         }
+        markPhase('audio-prepare');
         // 4. Process audio segments
         onProgress({ status: 'processing', progress: 20, detail: 'Đang xử lý âm thanh...' });
         const audioProcessor = new AudioProcessor_1.AudioProcessor(ffmpegPath, finalConfig.duckVolume);
@@ -341,10 +353,13 @@ const createFinalVideo = async (projectPath, onProgress, duckVolume = 0.15, conf
                 detail: `Đang xử lý âm thanh ${Math.round(pct)}%...`
             });
         });
+        markPhase('audio-segments');
         // 5. Validate segments based on ACTUAL audio durations
         onProgress({ status: 'rerendering', progress: 55, detail: 'Đang xác thực phân đoạn...' });
         const validator = new SegmentValidator_1.SegmentValidator();
         const validatedSegments = validator.validateAndAdjust(segments, audioResult.actualDurations, videoDuration);
+        const expectedFinalDuration = validatedSegments.reduce((total, segment) => total + segment.adjustedDuration, 0);
+        markPhase('segment-validation');
         // SRT export with adjusted timeline (non-fatal)
         const exportLang = finalConfig.lang;
         if (exportLang || fs_1.default.existsSync(path_1.default.join(projectPath, 'translate'))) {
@@ -386,6 +401,7 @@ const createFinalVideo = async (projectPath, onProgress, duckVolume = 0.15, conf
             });
         }, !isSourceH264);
         console.log(`[FinalVideoService] Processed ${chunkVideoPaths.length} video chunks`);
+        markPhase('video-chunks');
         // 8. Concat video chunks
         onProgress({ status: 'rerendering', progress: 75, detail: 'Đang gộp video...' });
         const outputDir = path_1.default.join(projectPath, 'final');
@@ -393,49 +409,79 @@ const createFinalVideo = async (projectPath, onProgress, duckVolume = 0.15, conf
             fs_1.default.mkdirSync(outputDir, { recursive: true });
         const outputPath = path_1.default.join(outputDir, 'final_video.mp4');
         const tempVideoPath = path_1.default.join(tempDir, 'concated_video.mp4');
+        let videoForMuxPath = tempVideoPath;
         try {
-            console.log(`[FinalVideoService] Source is ${videoMeta.codec} → safe re-encode concat`);
-            await videoProcessor.concatenateVideo(chunkVideoPaths, tempVideoPath, false);
+            if (isSourceH264) {
+                console.log('[FinalVideoService] Trying fast stream-copy concat');
+                try {
+                    await videoProcessor.concatenateCopy(chunkVideoPaths, tempVideoPath);
+                }
+                catch (copyConcatErr) {
+                    console.warn('[FinalVideoService] Stream-copy concat failed, falling back to re-encode concat:', copyConcatErr);
+                    await videoProcessor.concatenateVideo(chunkVideoPaths, tempVideoPath, false);
+                }
+            }
+            else {
+                console.log(`[FinalVideoService] Source is ${videoMeta.codec} → safe re-encode concat`);
+                await videoProcessor.concatenateVideo(chunkVideoPaths, tempVideoPath, false);
+            }
+            const concatVideoMeta = await getVideoMetadata(tempVideoPath);
+            const concatDrift = concatVideoMeta.duration - expectedFinalDuration;
+            console.log(`[FinalVideoService] Concat video duration: expected=${expectedFinalDuration.toFixed(3)}s, actual=${concatVideoMeta.duration.toFixed(3)}s, drift=${concatDrift.toFixed(3)}s`);
+            if (concatVideoMeta.duration > 0 && Math.abs(concatDrift) > 0.5) {
+                console.warn('[FinalVideoService] Stream-copy concat duration drift detected, falling back to re-encode concat');
+                await videoProcessor.concatenateVideo(chunkVideoPaths, tempVideoPath, false);
+            }
+            const finalConcatMeta = await getVideoMetadata(tempVideoPath);
+            const finalConcatDrift = finalConcatMeta.duration - expectedFinalDuration;
+            if (finalConcatMeta.duration > 0 && Math.abs(finalConcatDrift) > 0.5) {
+                const normalizedVideoPath = path_1.default.join(tempDir, 'normalized_video.mp4');
+                console.warn(`[FinalVideoService] Video duration still drifts by ${finalConcatDrift.toFixed(3)}s, normalizing before mux`);
+                await videoProcessor.normalizeVideoDuration(tempVideoPath, normalizedVideoPath, expectedFinalDuration, finalConcatMeta.duration);
+                videoForMuxPath = normalizedVideoPath;
+            }
         }
         catch (concatErr) {
             throw new Error(`Lỗi gộp video: ${concatErr.message}`);
         }
+        markPhase('video-concat');
         // 9. Concat audio segments into one stream
         onProgress({ status: 'rerendering', progress: 85, detail: 'Đang gộp âm thanh...' });
         let finalAudioPath;
         try {
-            finalAudioPath = await audioProcessor.concatenateAudio(audioResult.segmentPaths, tempDir);
+            finalAudioPath = await audioProcessor.concatenateAudio(audioResult.segmentPaths, tempDir, expectedFinalDuration);
         }
         catch (audioErr) {
             throw new Error(`Lỗi gộp âm thanh: ${audioErr.message}`);
         }
+        markPhase('audio-concat');
         // 10. Mux video + audio (1 final step instead of per-segment)
         onProgress({ status: 'rerendering', progress: 90, detail: 'Đang đồng bộ audio với video...' });
         try {
-            await videoProcessor.muxWithAudio(tempVideoPath, finalAudioPath, outputPath);
+            await videoProcessor.muxWithAudio(videoForMuxPath, finalAudioPath, outputPath);
         }
         catch (muxErr) {
             throw new Error(`Lỗi đồng bộ audio-video: ${muxErr.message}`);
         }
+        markPhase('mux');
         // Cleanup - delay to allow Windows to release file locks
         await new Promise(resolve => setTimeout(resolve, 500));
-        TempFileManager_1.tempManager.unregister(tempDir);
         try {
-            await TempFileManager_1.tempManager.cleanup();
+            await TempFileManager_1.tempManager.cleanupDirectory(tempDir);
         }
         catch (cleanupErr) {
             console.warn('[FinalVideoService] Cleanup warning:', cleanupErr);
             // Don't fail the render if cleanup fails
         }
+        markPhase('cleanup');
         const totalTime = Math.round((Date.now() - startTime) / 1000);
         onProgress({ status: 'done', progress: 100, detail: `Hoàn tất! Render mất ${totalTime}s.` });
         return outputPath;
     }
     catch (err) {
         const tempDir = path_1.default.join(projectPath, 'temp_final');
-        TempFileManager_1.tempManager.unregister(tempDir);
         try {
-            await TempFileManager_1.tempManager.cleanup();
+            await TempFileManager_1.tempManager.cleanupDirectory(tempDir);
         }
         catch (cleanupErr) {
             console.warn('[FinalVideoService] Error cleanup warning:', cleanupErr);

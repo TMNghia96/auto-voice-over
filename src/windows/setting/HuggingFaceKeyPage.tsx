@@ -9,14 +9,15 @@ export const HuggingFaceKeyPage = () => {
     const [showKey, setShowKey] = useState(false);
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
+    const [hasExistingKey, setHasExistingKey] = useState(false);
 
     useEffect(() => {
         loadKey();
     }, []);
 
     const loadKey = async () => {
-        const key = await window.api.getApiKey("huggingface");
-        setApiKey(key || "");
+        setHasExistingKey(await window.api.hasApiKey("huggingface"));
+        setApiKey("");
     };
 
     const handleSave = async () => {
@@ -25,6 +26,7 @@ export const HuggingFaceKeyPage = () => {
         setSaving(false);
 
         if (success) {
+            setHasExistingKey(apiKey.trim().length > 0);
             setSaved(true);
             setTimeout(() => setSaved(false), 2500);
         }
@@ -45,7 +47,7 @@ export const HuggingFaceKeyPage = () => {
                     <div className="relative flex-1">
                         <Input
                             type={showKey ? "text" : "password"}
-                            placeholder="hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                            placeholder={hasExistingKey ? "Đã lưu token. Nhập token mới để thay thế." : "hf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"}
                             value={apiKey}
                             onChange={(e) => setApiKey(e.target.value)}
                             className="pr-10 font-mono text-sm"

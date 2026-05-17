@@ -57,8 +57,7 @@ export const TranslatePhase = ({ onComplete }: { onComplete?: () => void }) => {
                 setTranslatedEntries([]);
                 setPhase("idle");
 
-                const apiKey = await window.api.getApiKey("deepseek");
-                setHasApiKey(!!apiKey);
+                setHasApiKey(await window.api.hasApiKey("deepseek"));
 
                 const loadedPrompts = (await window.api.getPrompts()) || [];
                 setPrompts(loadedPrompts);
@@ -134,22 +133,6 @@ export const TranslatePhase = ({ onComplete }: { onComplete?: () => void }) => {
         setProgress({ current: 0, total: srtEntries.length, percent: 0 });
 
         try {
-            const apiKey = await window.api.getApiKey("deepseek");
-            const langName = TARGET_LANGUAGES.find(l => l.code === selectedLang)?.name || selectedLang;
-            const promptConfig = prompts.find(p => p.id === selectedPromptId) || prompts[0];
-            const userPrompt = promptConfig?.systemPrompt || "";
-
-            // Program auto-injects language direction + format rules
-            const systemPrompt = `Translate subtitle segments to ${langName}.
-
-FORMAT RULES:
-- Each segment is separated by "---"
-- Return ONLY the translated segments separated by "---", nothing else
-- Preserve the same number of segments
-- Do NOT add any extra text, explanation, or numbering
-
-${userPrompt}`.trim();
-
             const BATCH_SIZE = 20;
             const CONCURRENCY = 5;
 
@@ -162,36 +145,12 @@ ${userPrompt}`.trim();
             const translatedMap = new Map<number, string>();
 
             const processBatch = async (batch: SrtEntry[]) => {
-                const textsToTranslate = batch.map(e => e.text).join("\n---\n");
-
                 try {
-                    const response = await fetch("https://api.deepseek.com/chat/completions", {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                            "Authorization": `Bearer ${apiKey}`
-                        },
-                        body: JSON.stringify({
-                            model: "deepseek-chat",
-                            messages: [
-                                {
-                                    role: "system",
-                                    content: systemPrompt
-                                },
-                                {
-                                    role: "user",
-                                    content: textsToTranslate
-                                },
-                            ],
-                            temperature: 0.3
-                        })
-                    });
-
-                    if (!response.ok) throw new Error(await response.text());
-
-                    const data = await response.json();
-                    const translatedText = data.choices?.[0]?.message?.content || "";
-                    const translatedParts = translatedText.split(/\n?---\n?/);
+                    const translatedParts = await window.api.translateSegments(
+                        selectedLang,
+                        batch.map(e => e.text),
+                        selectedPromptId,
+                    );
 
                     batch.forEach((entry, idx) => {
                         translatedMap.set(entry.index, translatedParts[idx]?.trim() || entry.text);
